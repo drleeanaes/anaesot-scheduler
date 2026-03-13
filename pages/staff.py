@@ -194,14 +194,41 @@ def show():
                     unsafe_allow_html=True,
                 )
 
-                # Toggle edit button
+                # ✏️ edit toggle
                 btn_label = "✕" if is_editing else "✏️"
                 if row[5].button(btn_label, key=f"editbtn_{m.id}", use_container_width=True):
                     if is_editing:
                         st.session_state.editing_staff_id = None
                     else:
                         st.session_state.editing_staff_id = m.id
+                        st.session_state.confirm_delete_id = None
                     st.rerun()
+
+                # 🗑 delete with confirmation strip
+                if st.session_state.get("confirm_delete_id") == m.id:
+                    conf_cols = st.columns([3, 1, 1])
+                    conf_cols[0].warning(f"⚠ Permanently remove **{m.name}**?")
+                    if conf_cols[1].button("✓ Yes, remove", key=f"confirm_{m.id}",
+                                           type="primary", use_container_width=True):
+                        with SessionLocal() as s:
+                            member = s.get(Staff, m.id)
+                            if member:
+                                member.active = False
+                                s.commit()
+                        st.session_state.confirm_delete_id = None
+                        st.session_state.editing_staff_id  = None
+                        st.success(f"✓ {m.name} removed from active roster.")
+                        st.rerun()
+                    if conf_cols[2].button("✕ Cancel", key=f"canceldelete_{m.id}",
+                                           use_container_width=True):
+                        st.session_state.confirm_delete_id = None
+                        st.rerun()
+                else:
+                    del_cols = st.columns([9.4, 0.6])
+                    if del_cols[1].button("🗑", key=f"delbtn_{m.id}", use_container_width=True):
+                        st.session_state.confirm_delete_id = m.id
+                        st.session_state.editing_staff_id  = None
+                        st.rerun()
 
                 # Inline edit panel — appears directly below the row
                 if is_editing:
