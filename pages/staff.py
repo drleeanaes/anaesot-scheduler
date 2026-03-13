@@ -10,6 +10,13 @@ ROLES = ["Consultant", "Specialist", "Senior Trainee", "Trainee"]
 DAYS  = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 DAY_COLS = [f"ot_{d.lower()}" for d in DAYS]
 
+ROLE_COLOURS = {
+    "Consultant":     "#1f8ef1",
+    "Specialist":     "#00d4aa",
+    "Senior Trainee": "#f59e0b",
+    "Trainee":        "#8b949e",
+}
+
 
 def _import_df_to_db(df: pd.DataFrame, col_map: dict):
     """Import parsed DataFrame into the Staff table."""
@@ -38,8 +45,8 @@ def _import_df_to_db(df: pd.DataFrame, col_map: dict):
 
             existing = s.query(Staff).filter(Staff.name == name).first()
             if existing:
-                existing.role      = role
-                existing.pregnant  = pregnant
+                existing.role        = role
+                existing.pregnant    = pregnant
                 existing.specialties = specs
                 for k, v in ot_vals.items():
                     setattr(existing, k, v)
@@ -56,14 +63,93 @@ def _import_df_to_db(df: pd.DataFrame, col_map: dict):
     return added, updated, skipped
 
 
+def _save_staff_edits(staff_id: int, role: str, specialties: str,
+                      pregnant: bool, ot_vals: dict):
+    """Persist edits for a single staff member."""
+    with SessionLocal() as s:
+        m = s.get(Staff, staff_id)
+        if m:
+            m.role        = role
+            m.specialties = specialties
+            m.pregnant    = pregnant
+            for k, v in ot_vals.items():
+                setattr(m, k, v)
+            s.commit()
+
+
+def _render_edit_panel(staff_id: int, staff_list: list):
+    """Render the slide-in edit panel for the selected staff member."""
+    m = next((x for x in staff_list if x.id == staff_id), None)
+    if not m:
+        return
+
+    colour = ROLE_COLOURS.get(m.role, "#8b949e")
+    st.markdown(f"""
+    <div class="card card-accent" style="border-left-color:{colour};">
+        <strong style="font-size:1.05rem;">{m.name}</strong>
+        &nbsp;<span class="badge-ok" style="background:{colour}22;color:{colour};border-color:{colour};">
+            {m.role}
+        </span>
+        {"&nbsp;<span class='badge-warn'>⚠ Pregnant</span>" if m.pregnant else ""}
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.form(key=f"edit_form_{staff_id}"):
+        col1, col2 = st.columns(2)
+
+        # Role selector
+        current_role_idx = ROLES.index(m.role) if m.role in ROLES else 0
+        new_role = col1.selectbox("Role", ROLES, index=current_role_idx)
+
+        # Pregnant toggle
+        new_pregnant = col2.checkbox("Pregnant", value=m.pregnant)
+
+        # Specialties
+        new_specs = st.text_input(
+            "Specialties (comma-separated)",
+            value=m.specialties,
+            placeholder="e.g. neuro, paeds, colorectal",
+        )
+
+        # OT days
+        st.markdown("**OT Duty Days:**")
+        day_cols_ui = st.columns(7)
+        ot_selections = {}
+        for i, d in enumerate(DAYS):
+            current_val = getattr(m, f"ot_{d.lower()}", False)
+            ot_selections[d] = day_cols_ui[i].checkbox(d, value=current_val,
+                                                        key=f"edit_ot_{staff_id}_{d}")
+
+        col_save, col_cancel = st.columns([1, 1])
+        saved    = col_save.form_submit_button("💾 Save Changes", type="primary",
+                                               use_container_width=True)
+        cancelled = col_cancel.form_submit_button("✕ Cancel", use_container_width=True)
+
+        if saved:
+            ot_vals = {f"ot_{d.lower()}": v for d, v in ot_selections.items()}
+            _save_staff_edits(staff_id, new_role, new_specs.strip(), new_pregnant, ot_vals)
+            st.success(f"✓ {m.name} updated successfully.")
+            st.session_state.editing_staff_id = None
+            st.rerun()
+
+        if cancelled:
+            st.session_state.editing_staff_id = None
+            st.rerun()
+
+
 def show():
     st.markdown("## 👥 Staff Management")
 
+    # Initialise edit state
+    if "editing_staff_id" not in st.session_state:
+        st.session_state.editing_staff_id = None
+
     tab1, tab2, tab3 = st.tabs(["📋 View Roster", "📤 Upload Excel", "➕ Add / Edit Staff"])
 
-    # ── Tab 1: View roster ────────────────────────────────────────────────────
+    # ── Tab 1: View roster with click-to-edit ────────────────────────────────
     with tab1:
         st.markdown('<div class="section-header">Active Roster</div>', unsafe_allow_html=True)
+        st.caption("Click ✏️ next to any staff member to edit their role, specialties, OT days or pregnant status.")
 
         col_filter, col_role = st.columns(2)
         search = col_filter.text_input("🔍 Search by name", placeholder="e.g. Smith")
@@ -80,37 +166,88 @@ def show():
         if not staff_list:
             st.info("No staff found. Upload a roster or add staff manually.")
         else:
-            rows = []
+            # ── Roster table with edit buttons ────────────────────────────────
+            # Header row
+            h = st.columns([2.2, 1.4, 2.2, 1, 1.8, 0.6])
+            for label, col in zip(["Name", "Role", "Specialties", "Pregnant", "OT Days", ""], h):
+                col.markdown(f"<small><b>{label}</b></small>", unsafe_allow_html=True)
+            st.divider()
+
             for m in staff_list:
                 ot_days = [d for d in DAYS if getattr(m, f"ot_{d.lower()}", False)]
-                rows.append({
-                    "ID":         m.id,
-                    "Name":       m.name,
-                    "Role":       m.role,
-                    "Specialties": m.specialties,
-                    "Pregnant":   "⚠ Yes" if m.pregnant else "No",
-                    "OT Days":    ", ".join(ot_days) if ot_days else "—",
-                })
-            df = pd.DataFrame(rows)
-            st.dataframe(df, use_container_width=True, hide_index=True)
+                colour  = ROLE_COLOURS.get(m.role, "#8b949e")
+                is_editing = st.session_state.editing_staff_id == m.id
 
-            # Individual stats expander
+                row = st.columns([2.2, 1.4, 2.2, 1, 1.8, 0.6])
+                row[0].markdown(m.name)
+                row[1].markdown(
+                    f'<span style="color:{colour};font-weight:600;">{m.role}</span>',
+                    unsafe_allow_html=True,
+                )
+                row[2].markdown(
+                    f'<small>{m.specialties if m.specialties else "—"}</small>',
+                    unsafe_allow_html=True,
+                )
+                row[3].markdown("⚠ Yes" if m.pregnant else "No")
+                row[4].markdown(
+                    f'<small>{", ".join(ot_days) if ot_days else "—"}</small>',
+                    unsafe_allow_html=True,
+                )
+
+                # Toggle edit button
+                btn_label = "✕" if is_editing else "✏️"
+                if row[5].button(btn_label, key=f"editbtn_{m.id}", use_container_width=True):
+                    if is_editing:
+                        st.session_state.editing_staff_id = None
+                    else:
+                        st.session_state.editing_staff_id = m.id
+                    st.rerun()
+
+                # Inline edit panel — appears directly below the row
+                if is_editing:
+                    with st.container():
+                        st.markdown("")
+                        _render_edit_panel(m.id, staff_list)
+                    st.divider()
+
+            st.markdown("---")
+
+            # ── Quick role reassignment summary ───────────────────────────────
+            st.markdown('<div class="section-header">Role Distribution</div>', unsafe_allow_html=True)
+            role_counts = {r: sum(1 for m in staff_list if m.role == r) for r in ROLES}
+            cols = st.columns(4)
+            for i, (role, count) in enumerate(role_counts.items()):
+                colour = ROLE_COLOURS[role]
+                cols[i].markdown(
+                    f'<div class="metric-tile">'
+                    f'<div class="val" style="color:{colour};">{count}</div>'
+                    f'<div class="lbl">{role}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+            # ── Individual stats expander ──────────────────────────────────────
             with st.expander("📊 View individual stats"):
-                names = [m.name for m in staff_list]
+                names  = [m.name for m in staff_list]
                 chosen = st.selectbox("Select staff member", names)
                 chosen_staff = next((m for m in staff_list if m.name == chosen), None)
                 if chosen_staff:
                     with SessionLocal() as s:
-                        stat = s.query(StaffStats).filter(StaffStats.staff_id == chosen_staff.id).first()
+                        stat = s.query(StaffStats).filter(
+                            StaffStats.staff_id == chosen_staff.id
+                        ).first()
                     if stat:
                         c1, c2, c3 = st.columns(3)
                         c1.metric("Total Consultations", stat.total_consultations or 0)
                         c2.metric("Total Rooms",         stat.total_rooms or 0)
-                        c3.metric("Last Assigned",       str(stat.last_assigned_date) if stat.last_assigned_date else "Never")
+                        c3.metric("Last Assigned",
+                                  str(stat.last_assigned_date) if stat.last_assigned_date else "Never")
                         if stat.surgery_type_counts:
                             sc = json.loads(stat.surgery_type_counts)
                             if sc:
-                                sc_df = pd.DataFrame(list(sc.items()), columns=["Surgery Type", "Count"])
+                                sc_df = pd.DataFrame(
+                                    list(sc.items()), columns=["Surgery Type", "Count"]
+                                )
                                 st.bar_chart(sc_df.set_index("Surgery Type"))
 
     # ── Tab 2: Upload Excel ───────────────────────────────────────────────────
@@ -141,8 +278,7 @@ def show():
             expected = ["Name", "Role", "Pregnant", "Specialties",
                         "OT_Mon", "OT_Tue", "OT_Wed", "OT_Thu", "OT_Fri", "OT_Sat", "OT_Sun"]
 
-            # Auto-detect or map
-            col_map = {}
+            col_map     = {}
             auto_matched = all(e in cols for e in expected)
 
             if auto_matched:
@@ -158,23 +294,29 @@ def show():
 
             if st.button("✅ Import Roster", type="primary"):
                 added, updated, skipped = _import_df_to_db(df_raw, col_map)
-                st.success(f"Import complete: **{added}** added, **{updated}** updated, **{skipped}** skipped.")
+                st.success(
+                    f"Import complete: **{added}** added, **{updated}** updated, **{skipped}** skipped."
+                )
                 st.rerun()
 
-        st.markdown('<div class="section-header">Download Sample Roster Template</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">Download Sample Roster Template</div>',
+                    unsafe_allow_html=True)
         if st.button("📥 Generate Sample XLSX"):
             sample_data = {
-                "Name":       ["Dr. Alice Chen",   "Dr. Bob Patel",   "Dr. Carol Mensah",  "Dr. David Kim",    "Dr. Eva Torres"],
-                "Role":       ["Consultant",        "Specialist",      "Specialist",         "Senior Trainee",   "Trainee"],
-                "Pregnant":   ["No",                "No",              "Yes",                "No",               "No"],
-                "Specialties":["neuro, paeds",      "neuro, colorectal","obstetric, general","vascular, urology","general"],
-                "OT_Mon":     ["Yes","Yes","Yes","Yes","No"],
-                "OT_Tue":     ["Yes","No", "Yes","Yes","Yes"],
-                "OT_Wed":     ["No", "Yes","No", "Yes","Yes"],
-                "OT_Thu":     ["Yes","Yes","Yes","No", "Yes"],
-                "OT_Fri":     ["Yes","Yes","No", "Yes","No"],
-                "OT_Sat":     ["No", "No", "No", "No", "No"],
-                "OT_Sun":     ["No", "No", "No", "No", "No"],
+                "Name":        ["Dr. Alice Chen",    "Dr. Bob Patel",    "Dr. Carol Mensah",
+                                "Dr. David Kim",     "Dr. Eva Torres"],
+                "Role":        ["Consultant",         "Specialist",       "Specialist",
+                                "Senior Trainee",    "Trainee"],
+                "Pregnant":    ["No","No","Yes","No","No"],
+                "Specialties": ["neuro, paeds",       "neuro, colorectal","obstetric, general",
+                                "vascular, urology", "general"],
+                "OT_Mon":  ["Yes","Yes","Yes","Yes","No"],
+                "OT_Tue":  ["Yes","No", "Yes","Yes","Yes"],
+                "OT_Wed":  ["No", "Yes","No", "Yes","Yes"],
+                "OT_Thu":  ["Yes","Yes","Yes","No", "Yes"],
+                "OT_Fri":  ["Yes","Yes","No", "Yes","No"],
+                "OT_Sat":  ["No", "No", "No", "No", "No"],
+                "OT_Sun":  ["No", "No", "No", "No", "No"],
             }
             sample_df = pd.DataFrame(sample_data)
             buf = io.BytesIO()
@@ -185,7 +327,7 @@ def show():
                 "⬇️ Download sample_roster.xlsx",
                 data=buf,
                 file_name="sample_roster.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
     # ── Tab 3: Add / Edit staff ───────────────────────────────────────────────
