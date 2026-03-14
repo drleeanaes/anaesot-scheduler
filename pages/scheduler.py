@@ -736,18 +736,65 @@ def show():
 
         # ── Consultation ──────────────────────────────────────────────────────
         st.markdown('<div class="section-header">Consultation Slot</div>', unsafe_allow_html=True)
-        # Consultation: pm_paac colleagues can be assigned if AM available
+
+        # Consultation pool: Senior Trainee, Specialist, Consultant
+        # Must be on OT (am or pm available), not AM call, not coordinator
         consult_pool = [cd for cd in all_day
-                        if cd.staff.role in ("Specialist","Senior Trainee")
+                        if cd.staff.role in ("Consultant", "Specialist", "Senior Trainee")
                         and cd.staff.name != coordinator_name
-                        and not cd.am_call]
+                        and not cd.am_call
+                        and (cd.am_avail or cd.pm_avail)]
+        consult_pool.sort(key=lambda cd: cd.staff.total_consults)
+
         c_opts = ["— Unassigned —"] + [cd.staff.name for cd in consult_pool]
         c_default = st.session_state.get("consult_manual", "— Unassigned —")
         c_idx = c_opts.index(c_default) if c_default in c_opts else 0
+
         col_c1, col_c2 = st.columns([2, 2])
-        chosen_consult = col_c1.selectbox("Assign Consultation to", c_opts, index=c_idx, key="consult_select")
+        chosen_consult = col_c1.selectbox("Assign Consultation to", c_opts,
+                                          index=c_idx, key="consult_select")
         st.session_state["consult_manual"] = chosen_consult
-        col_c2.caption(f"Criteria: `{consult_criteria}`")
+        col_c2.caption(f"Criteria: `{consult_criteria}` · sorted by fewest consults first")
+
+        # ── Consultation load table ───────────────────────────────────────────
+        with st.expander("📊 Consultation load — Senior Trainee / Specialist / Consultant", expanded=True):
+            from database import SessionLocal as _SL, Staff as _Staff, StaffStats as _SS
+            with _SL() as _s:
+                _stat_rows = (
+                    _s.query(_Staff, _SS)
+                     .outerjoin(_SS, _Staff.id == _SS.staff_id)
+                     .filter(
+                         _Staff.active == True,
+                         _Staff.role.in_(["Consultant","Specialist","Senior Trainee"])
+                     )
+                     .order_by(_SS.total_consultations)
+                     .all()
+                )
+
+            # Mark who is available today and who is selected
+            avail_ids  = {cd.staff.id for cd in all_day if cd.am_avail or cd.pm_avail}
+            chosen_cd  = next((cd for cd in consult_pool
+                               if cd.staff.name == chosen_consult), None)
+            chosen_id  = chosen_cd.staff.id if chosen_cd else None
+
+            load_rows = []
+            for m, stat in _stat_rows:
+                today_avail = m.id in avail_ids
+                is_chosen   = m.id == chosen_id
+                load_rows.append({
+                    "Name":        ("✅ " if is_chosen else "") + m.name,
+                    "Role":        m.role,
+                    "Total Consults": stat.total_consultations if stat else 0,
+                    "Today":       "On duty" if today_avail else "—",
+                    "Last Consult": str(stat.last_consultation) if (stat and stat.last_consultation) else "Never",
+                })
+
+            import pandas as _pd
+            load_df = _pd.DataFrame(load_rows)
+            # Colour-code: highlight selected row
+            st.dataframe(load_df, use_container_width=True, hide_index=True)
+            st.caption(f"✅ = currently selected for today's consultation · "
+                       f"sorted by fewest consultations")
 
         st.divider()
 
