@@ -119,7 +119,7 @@ def _classify_cell(pm_val, am_val):
     pm_ot = "pm ot" in pm_l or "pm ot" in am_l
 
     # ── Whole-day OT ──────────────────────────────────────────────────────────
-    # "OT" alone (not prefixed with am/pm) means whole day
+    # "OT" token in PM cell (e.g. OT, OT*, OT-, OT/Pain) = whole day OT
     ot_whole = (
         "OT" in pm.upper() and
         "AM OT" not in pm.upper() and
@@ -130,7 +130,9 @@ def _classify_cell(pm_val, am_val):
         "PM OT" not in am.upper()
     )
 
-    # Refine am_ot / pm_ot
+    # Only expand to whole-day availability if OT is confirmed in the cell
+    # Non-OT values (AL, off, Pain, RH, Sick, Study, ML etc.) do NOT make
+    # someone available — they must have explicit OT, am OT, pm OT, or am call
     if ot_whole and not pm_paac:
         am_ot = am_ot or (not am_blocked)
         pm_ot = pm_ot or (not pm_blocked)
@@ -197,7 +199,7 @@ def parse_custom_roster(file_obj, consultant_rows, specialist_rows, trainee_rows
         if name.lower() in FOOTER_KEYWORDS:
             continue
 
-        am_row = name_row + 1
+        am_row = name_row - 1  # AM sub-row is the row ABOVE the name, not below
         ot_by_date         = {}
         am_ot_dates        = []
         pm_ot_dates        = []

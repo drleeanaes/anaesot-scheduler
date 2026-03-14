@@ -81,11 +81,15 @@ def _get_day_availability(target_date: date) -> list:
             pm_blocked = target_date in get_pm_blocked_dates(m) or pm_paac
 
             # Determine session availability
-            am_avail = (not am_blocked) and (not am_call is False or am_call)
-            # am_call colleagues are AM available (emergency team)
+            # For pm_paac colleagues: am_avail requires explicit am_ot entry
+            # (just having pm_paac with no AM entry does NOT make them AM available)
             if am_call:
                 am_avail = True
                 pm_avail = not pm_blocked
+            elif pm_paac:
+                # pm PAAC colleague: only AM available if they have an explicit am OT entry
+                am_avail = am_ot and not am_blocked
+                pm_avail = False  # pm PAAC always blocks PM
             else:
                 am_avail = not am_blocked
                 pm_avail = not pm_blocked
@@ -316,18 +320,23 @@ def _generate_draft(all_day, rooms, coordinator_name, specialty_prefs, consult_c
             pm_lead_cd = _pick_lead(pm_pool, pm_used, coordinator_name, stype_str, specialty_prefs)
         pm_lead = pm_lead_cd.staff.name if pm_lead_cd else "— Unassigned —"
 
-        # PM Assistant: prefer same person as AM assistant for continuity
-        # Optional — blank if no Senior Trainee/Trainee available
+        # PM Assistant logic:
+        # 1. If the AM assistant is also PM available → reuse them (same pair, same room)
+        # 2. If the AM assistant has pm PAAC (AM-only) → leave PM assistant BLANK
+        #    unless there are surplus trainees after all rooms have their leads covered
+        # 3. Only pick a new PM assistant if genuinely spare trainees are available
         pm_asst_cd = None
         if am_asst_cd:
             same_asst_pm = next((cd for cd in pm_pool
                                  if cd.staff.id == am_asst_cd.staff.id
                                  and cd.staff.id not in pm_used), None)
             if same_asst_pm:
+                # Same person available PM — reuse
                 pm_asst_cd = same_asst_pm
                 pm_used.add(same_asst_pm.staff.id)
-        if pm_asst_cd is None:
-            pm_asst_cd = _pick_asst(pm_pool, pm_used, coordinator_name)
+            # else: AM asst has pm PAAC or not PM available — leave blank for now
+            # We'll fill in surplus trainees in a second pass after all rooms processed
+
         pm_asst = pm_asst_cd.staff.name if pm_asst_cd else "— Unassigned —"
 
         ma[room] = {
@@ -335,6 +344,30 @@ def _generate_draft(all_day, rooms, coordinator_name, specialty_prefs, consult_c
             "pm_lead": pm_lead, "pm_asst": pm_asst,
             "_note": "",
         }
+
+    # ── Second pass: fill PM assistants with surplus trainees ────────────────
+    # Only assign a replacement PM assistant if there are spare Senior Trainee/Trainee
+    # left after all rooms have their leads. This avoids forcing a replacement when
+    # the AM assistant had pm PAAC (they were AM-only).
+    spare_pm_trainees = [
+        cd for cd in pm_pool
+        if cd.staff.id not in pm_used
+        and cd.staff.role in ("Senior Trainee", "Trainee")
+        and cd.staff.name != coordinator_name
+    ]
+    spare_pm_trainees.sort(key=lambda cd: cd.staff.total_rooms)
+
+    for room in rooms:
+        stype_room = special_types.get(room, "normal")
+        if stype_room in ("eot", "trauma"):
+            continue
+        a = ma.get(room, {})
+        # Only fill blank PM assistants, and only if spare trainees exist
+        if a.get("pm_asst", "— Unassigned —") == "— Unassigned —" and spare_pm_trainees:
+            cd = spare_pm_trainees.pop(0)
+            pm_used.add(cd.staff.id)
+            a["pm_asst"] = cd.staff.name
+            ma[room] = a
 
     # Consultation — Specialist or Senior Trainee not yet used
     all_used = am_used | pm_used
@@ -375,14 +408,26 @@ def _pick_asst(pool, used, coordinator_name):
     Assistant must be Senior Trainee or Trainee only.
     Specialists and Consultants should always be leads, never assistants.
     Assistant is optional — returns None if no suitable person available.
+
+    Preference order:
+      1. Trainees/Senior Trainees with NO pm PAAC (full-day available)
+      2. Trainees/Senior Trainees WITH pm PAAC — only used as last resort
+    This avoids assigning a pm PAAC trainee to a room when a full-day
+    trainee is available, since their PM slot would be blank anyway.
     """
     candidates = [cd for cd in pool
                   if cd.staff.id not in used
                   and cd.staff.name != coordinator_name
                   and cd.staff.role in ("Senior Trainee", "Trainee")]
     if not candidates: return None
-    candidates.sort(key=lambda cd: cd.staff.total_rooms)
-    cd = candidates[0]
+
+    # Prefer non-PAAC first
+    preferred = [cd for cd in candidates if not cd.pm_paac]
+    fallback  = [cd for cd in candidates if cd.pm_paac]
+
+    chosen = preferred or fallback
+    chosen.sort(key=lambda cd: cd.staff.total_rooms)
+    cd = chosen[0]
     used.add(cd.staff.id)
     return cd
 
