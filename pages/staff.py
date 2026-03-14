@@ -63,7 +63,7 @@ def _cell_is_coordinator(pm_val, am_val) -> bool:
     am = str(am_val).strip() if am_val else ""
     return "OT*" in pm or "OT*" in am
 
-def parse_custom_roster(file_obj, consultant_rows, specialist_rows):
+def parse_custom_roster(file_obj, consultant_rows, specialist_rows, trainee_rows=None):
     wb = openpyxl.load_workbook(file_obj, data_only=True)
     ws = wb.active
 
@@ -81,6 +81,8 @@ def parse_custom_roster(file_obj, consultant_rows, specialist_rows):
     FOOTER_KEYWORDS = {"1 call", "2 call", "3 call", "rh call", "remark"}
     role_map = {r: "Consultant" for r in consultant_rows}
     role_map.update({r: "Specialist" for r in specialist_rows})
+    if trainee_rows:
+        role_map.update({r: "Trainee" for r in trainee_rows})
 
     results = []
     for name_row, role in sorted(role_map.items()):
@@ -347,27 +349,30 @@ def show():
         • <b>Column A</b> – Colleague name (every other row; row below = AM entries)<br>
         • Cell contains <code>OT</code> → <b>available for OT</b> that day<br>
         • Cell contains <code>OT*</code> → available <b>AND designated Day Coordinator ⭐</b><br>
-        • <b>Rows 4–16</b> → Consultant &nbsp;|&nbsp; <b>Rows 18–92</b> → Specialist<br>
+        • <b>Rows 4–16</b> → Consultant &nbsp;|&nbsp; <b>Rows 18–42</b> → Specialist &nbsp;|&nbsp; <b>Rows 44–92</b> → Trainee<br>
         • Day Coordinators are excluded from room assignment by the optimiser
         </div>
         """, unsafe_allow_html=True)
 
         with st.expander("⚙️ Adjust row boundaries (only if your file layout differs)"):
-            col_a, col_b = st.columns(2)
+            col_a, col_b, col_c = st.columns(3)
             cons_start = col_a.number_input("Consultant — first name row", value=4,  min_value=1)
             cons_end   = col_a.number_input("Consultant — last name row",  value=16, min_value=1)
             spec_start = col_b.number_input("Specialist — first name row", value=18, min_value=1)
-            spec_end   = col_b.number_input("Specialist — last name row",  value=92, min_value=1)
+            spec_end   = col_b.number_input("Specialist — last name row",  value=42, min_value=1)
+            train_start = col_c.number_input("Trainee — first name row",   value=44, min_value=1)
+            train_end   = col_c.number_input("Trainee — last name row",    value=92, min_value=1)
 
-        cons_rows = list(range(int(cons_start), int(cons_end) + 1, 2))
-        spec_rows = list(range(int(spec_start), int(spec_end) + 1, 2))
+        cons_rows  = list(range(int(cons_start),  int(cons_end)  + 1, 2))
+        spec_rows  = list(range(int(spec_start),  int(spec_end)  + 1, 2))
+        train_rows = list(range(int(train_start), int(train_end) + 1, 2))
 
         uploaded = st.file_uploader("Choose your department roster (.xlsx / .xls)",
                                     type=["xlsx", "xls"])
 
         if uploaded:
             try:
-                parsed, all_dates = parse_custom_roster(uploaded, cons_rows, spec_rows)
+                parsed, all_dates = parse_custom_roster(uploaded, cons_rows, spec_rows, train_rows)
             except Exception as e:
                 st.error(f"Could not parse file: {e}")
             else:
