@@ -53,9 +53,37 @@ def get_real_specialties(staff_obj) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _cell_is_ot(pm_val, am_val) -> bool:
-    pm = str(pm_val).strip().upper() if pm_val else ""
-    am = str(am_val).strip().upper() if am_val else ""
-    return "OT" in pm or "OT" in am
+    """
+    Returns True if the colleague is available for OT assignment that day.
+
+    Available:
+      • Cell contains 'OT' (OT, OT*, am OT, pm OT, OT/Pain, etc.)
+      • Cell contains 'am 1 call', 'am 2 call', or 'am 3 call' exactly
+
+    NOT available (everything else including):
+      • 'pm 1/2/3 call'       (PM call only)
+      • '1st/2nd/3rd call'    (whole-day standby, not assignable)
+      • 'RH call'             (Resting Hours)
+      • Pain / AL / off / Sick / blank / etc.
+    """
+    pm = str(pm_val).strip() if pm_val else ""
+    am = str(am_val).strip() if am_val else ""
+    combined = (pm + " " + am).upper()
+
+    # OT in any form
+    if "OT" in combined:
+        return True
+
+    pm_lower = pm.lower()
+    am_lower = am.lower()
+
+    # Only am 1/2/3 call are available — nothing else with "call"
+    AM_CALL_PATTERNS = ["am 1 call", "am 2 call", "am 3 call"]
+    for pat in AM_CALL_PATTERNS:
+        if pat in pm_lower or pat in am_lower:
+            return True
+
+    return False
 
 def _cell_is_coordinator(pm_val, am_val) -> bool:
     """OT* = on OT duty AND designated Day Coordinator for that date."""
