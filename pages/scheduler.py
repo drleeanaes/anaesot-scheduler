@@ -146,8 +146,24 @@ def _all_assigned_ids(manual_assign, consult_name, all_day) -> set:
 
 
 def _check_constraints(manual_assign, all_day, room_xray, coordinator_name, special_types):
+    """
+    Constraint rules:
+    - Lead must be Specialist or Consultant (never Trainee/Senior Trainee)
+    - Assistant must NOT be Specialist or Consultant
+    - Same person can work AM + PM in the SAME room (not a violation)
+    - Same person cannot be in two DIFFERENT rooms in the same session
+    - Pregnant staff cannot be in X-ray rooms
+    - Day Coordinator cannot be assigned room duty
+    - AM call team cannot be assigned rooms
+    - PM PAAC colleagues cannot work PM slots
+    - One specialist may lead two rooms — allowed (no violation)
+    """
     violations = []
-    used = {}  # staff_id → "room/slot"
+
+    # Track cross-room duplicates per session separately
+    # Key: (staff_id, session) → "room/slot"  — same room AM+PM is fine
+    am_used = {}  # staff_id → room (AM session)
+    pm_used = {}  # staff_id → room (PM session)
 
     for room, a in manual_assign.items():
         stype = special_types.get(room, "normal")
@@ -155,41 +171,74 @@ def _check_constraints(manual_assign, all_day, room_xray, coordinator_name, spec
             continue
 
         for slot_key, slot_label, session in [
-            ("am_lead", "AM Lead",   "AM"),
-            ("am_asst", "AM Asst",   "AM"),
-            ("pm_lead", "PM Lead",   "PM"),
-            ("pm_asst", "PM Asst",   "PM"),
+            ("am_lead", "AM Lead", "AM"),
+            ("am_asst", "AM Asst", "AM"),
+            ("pm_lead", "PM Lead", "PM"),
+            ("pm_asst", "PM Asst", "PM"),
         ]:
             name = a.get(slot_key, "")
             cd = _cd_by_name(all_day, name)
             if not cd:
-                if "lead" in slot_key:
+                if slot_key in ("am_lead", "pm_lead"):
                     violations.append(f"{room} {slot_label}: No lead assigned.")
                 continue
 
             m = cd.staff
-            # Availability for session
+
+            # Session availability
             avail = cd.am_avail if session == "AM" else cd.pm_avail
             if not avail:
-                violations.append(f"{room} {slot_label}: {m.name} is not available {session}.")
+                violations.append(f"{room} {slot_label}: {m.name} not available {session}.")
 
-            if "lead" in slot_key and m.role == "Trainee" and stype != "trauma":
-                violations.append(f"{room} {slot_label}: {m.name} is Trainee — cannot lead a normal room.")
+            # Role rules
+            if slot_key in ("am_lead", "pm_lead") and stype != "trauma":
+                if m.role not in ("Specialist", "Consultant"):
+                    violations.append(
+                        f"{room} {slot_label}: {m.name} is {m.role} — Lead must be Specialist or Consultant.")
+            if slot_key in ("am_asst", "pm_asst"):
+                if m.role in ("Specialist", "Consultant"):
+                    violations.append(
+                        f"{room} {slot_label}: {m.name} is {m.role} — Specialists/Consultants should be leads, not assistants.")
+
+            # X-ray + pregnancy
             if m.pregnant and room_xray.get(room, False):
                 violations.append(f"{room}: {m.name} is pregnant — cannot be in X-ray room.")
+
+            # Coordinator
             if m.name == coordinator_name:
                 violations.append(f"{room}: {m.name} is Day Coordinator — should not have room duty.")
-            if cd.am_call and "lead" in slot_key:
-                violations.append(f"{room} {slot_label}: {m.name} is AM Emergency Team — cannot be assigned to a room.")
-            # pm PAAC colleagues can work AM but not PM
-            if cd.pm_paac and session == "PM":
-                violations.append(f"{room}: {m.name} has pm PAAC — cannot be assigned to PM slots.")
 
-            slot_id = f"{room}/{slot_label}"
-            if m.id in used:
-                violations.append(f"{room} {slot_label}: {m.name} already assigned to {used[m.id]}.")
+            # AM call
+            if cd.am_call:
+                violations.append(f"{room} {slot_label}: {m.name} is AM Emergency Team — cannot be assigned.")
+
+            # PM PAAC
+            if cd.pm_paac and session == "PM":
+                violations.append(f"{room}: {m.name} has pm PAAC — cannot work PM.")
+
+            # Cross-room duplicate check (same person, same session, different room)
+            used_dict = am_used if session == "AM" else pm_used
+            if m.id in used_dict and used_dict[m.id] != room:
+                # Allow one specialist/consultant to lead two rooms (by design)
+                if slot_key in ("am_lead", "pm_lead") and m.role in ("Specialist", "Consultant"):
+                    pass  # Intentional — leading two rooms is permitted
+                else:
+                    violations.append(
+                        f"{room} {slot_label}: {m.name} already assigned to {used_dict[m.id]} ({session}).")
             else:
-                used[m.id] = slot_id
+                used_dict[m.id] = room
+
+            # Within same room: same person cannot be both lead and assistant in same session
+            am_lead_name = a.get("am_lead", "")
+            am_asst_name = a.get("am_asst", "")
+            pm_lead_name = a.get("pm_lead", "")
+            pm_asst_name = a.get("pm_asst", "")
+            if session == "AM" and am_lead_name == am_asst_name and am_lead_name not in ("", "— Unassigned —"):
+                if slot_key == "am_asst":
+                    violations.append(f"{room}: Same person ({name}) cannot be both AM Lead and AM Assistant.")
+            if session == "PM" and pm_lead_name == pm_asst_name and pm_lead_name not in ("", "— Unassigned —"):
+                if slot_key == "pm_asst":
+                    violations.append(f"{room}: Same person ({name}) cannot be both PM Lead and PM Assistant.")
 
     return violations
 
@@ -246,39 +295,39 @@ def _generate_draft(all_day, rooms, coordinator_name, specialty_prefs, consult_c
         # Preference: if AM lead is also PM available, keep them for PM lead (continuity)
         stype_str = st.session_state.room_stype.get(room, "General")
 
+        # Pick AM lead (Specialist/Consultant only)
         am_lead_cd = _pick_lead(am_pool, am_used, coordinator_name, stype_str, specialty_prefs)
         am_lead    = am_lead_cd.staff.name if am_lead_cd else "— Unassigned —"
 
-        # Try to reuse AM lead for PM (same person, same room) if they are PM available
+        # Pick AM assistant (Senior Trainee/Trainee only) — optional
+        am_asst_cd = _pick_asst(am_pool, am_used, coordinator_name)
+        am_asst    = am_asst_cd.staff.name if am_asst_cd else "— Unassigned —"
+
+        # PM Lead: prefer same person as AM lead for continuity in same room
         pm_lead_cd = None
         if am_lead_cd:
-            am_lead_in_pm = next((cd for cd in pm_pool
-                                  if cd.staff.id == am_lead_cd.staff.id
-                                  and cd.staff.id not in pm_used), None)
-            if am_lead_in_pm:
-                pm_lead_cd = am_lead_in_pm
-                pm_used.add(am_lead_in_pm.staff.id)
-
+            same_in_pm = next((cd for cd in pm_pool
+                               if cd.staff.id == am_lead_cd.staff.id
+                               and cd.staff.id not in pm_used), None)
+            if same_in_pm:
+                pm_lead_cd = same_in_pm
+                pm_used.add(same_in_pm.staff.id)
         if pm_lead_cd is None:
             pm_lead_cd = _pick_lead(pm_pool, pm_used, coordinator_name, stype_str, specialty_prefs)
         pm_lead = pm_lead_cd.staff.name if pm_lead_cd else "— Unassigned —"
 
-        # Try to reuse AM asst for PM asst too (same pair, same room)
-        am_asst_cd = _pick_asst(am_pool, am_used, coordinator_name)
-        am_asst    = am_asst_cd.staff.name if am_asst_cd else "— Unassigned —"
-
+        # PM Assistant: prefer same person as AM assistant for continuity
+        # Optional — blank if no Senior Trainee/Trainee available
         pm_asst_cd = None
         if am_asst_cd:
-            am_asst_in_pm = next((cd for cd in pm_pool
-                                  if cd.staff.id == am_asst_cd.staff.id
-                                  and cd.staff.id not in pm_used), None)
-            if am_asst_in_pm:
-                pm_asst_cd = am_asst_in_pm
-                pm_used.add(am_asst_in_pm.staff.id)
-
+            same_asst_pm = next((cd for cd in pm_pool
+                                 if cd.staff.id == am_asst_cd.staff.id
+                                 and cd.staff.id not in pm_used), None)
+            if same_asst_pm:
+                pm_asst_cd = same_asst_pm
+                pm_used.add(same_asst_pm.staff.id)
         if pm_asst_cd is None:
             pm_asst_cd = _pick_asst(pm_pool, pm_used, coordinator_name)
-        # Assistant is optional — leave blank if nobody available
         pm_asst = pm_asst_cd.staff.name if pm_asst_cd else "— Unassigned —"
 
         ma[room] = {
@@ -303,16 +352,18 @@ def _generate_draft(all_day, rooms, coordinator_name, specialty_prefs, consult_c
 
 
 def _pick_lead(pool, used, coordinator_name, stype, prefs):
+    """
+    Lead must be Specialist or Consultant only.
+    Prefer specialty match, then load balance.
+    """
     candidates = [cd for cd in pool
                   if cd.staff.id not in used
                   and cd.staff.name != coordinator_name
-                  and cd.staff.role in ("Specialist","Senior Trainee","Consultant")]
-    # Prefer specialty match
+                  and cd.staff.role in ("Specialist", "Consultant")]
     keywords = prefs.get(stype, [stype.lower()])
     matched  = [cd for cd in candidates if any(k in cd.staff.specialties for k in keywords)]
-    chosen   = (matched or candidates)
+    chosen   = matched or candidates
     if not chosen: return None
-    # Load balance
     chosen.sort(key=lambda cd: cd.staff.total_rooms)
     cd = chosen[0]
     used.add(cd.staff.id)
@@ -320,9 +371,15 @@ def _pick_lead(pool, used, coordinator_name, stype, prefs):
 
 
 def _pick_asst(pool, used, coordinator_name):
+    """
+    Assistant must be Senior Trainee or Trainee only.
+    Specialists and Consultants should always be leads, never assistants.
+    Assistant is optional — returns None if no suitable person available.
+    """
     candidates = [cd for cd in pool
                   if cd.staff.id not in used
-                  and cd.staff.name != coordinator_name]
+                  and cd.staff.name != coordinator_name
+                  and cd.staff.role in ("Senior Trainee", "Trainee")]
     if not candidates: return None
     candidates.sort(key=lambda cd: cd.staff.total_rooms)
     cd = candidates[0]
@@ -331,12 +388,13 @@ def _pick_asst(pool, used, coordinator_name):
 
 
 def _pick_solo(pool, used, coordinator_name, prefer_role="Senior Trainee"):
+    """Trauma room: Senior Trainee solo. Fallback to Specialist."""
     candidates = [cd for cd in pool
                   if cd.staff.id not in used
                   and cd.staff.name != coordinator_name]
     preferred = [cd for cd in candidates if cd.staff.role == prefer_role]
     fallback  = [cd for cd in candidates if cd.staff.role == "Specialist"]
-    chosen = (preferred or fallback)
+    chosen = preferred or fallback
     if not chosen: return "— Unassigned —"
     chosen.sort(key=lambda cd: cd.staff.total_rooms)
     cd = chosen[0]
