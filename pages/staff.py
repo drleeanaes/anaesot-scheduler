@@ -48,6 +48,13 @@ def get_am_call_dates(staff_obj) -> list:
     except Exception:
         return []
 
+def get_am_ot_dates(staff_obj) -> list:
+    """Dates where colleague has explicit AM OT availability."""
+    try:
+        return [date.fromisoformat(d) for d in json.loads(_parse_meta(staff_obj).get("am_ot_dates", "[]"))]
+    except Exception:
+        return []
+
 def get_pm_paac_dates(staff_obj) -> list:
     """Dates where colleague has pm PAAC duty."""
     try:

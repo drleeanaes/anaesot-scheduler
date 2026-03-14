@@ -37,7 +37,7 @@ class ColleagueDay:
 def _get_day_availability(target_date: date) -> list:
     """Return ColleagueDay list for everyone available on target_date."""
     from pages.staff import (
-        get_ot_dates, get_am_call_dates, get_pm_paac_dates,
+        get_ot_dates, get_am_call_dates, get_am_ot_dates, get_pm_paac_dates,
         get_am_blocked_dates, get_pm_blocked_dates, get_real_specialties,
     )
     try:
@@ -88,6 +88,7 @@ def _get_day_availability(target_date: date) -> list:
                 pm_avail = not pm_blocked
             elif pm_paac:
                 # pm PAAC colleague: only AM available if they have an explicit am OT entry
+                am_ot = target_date in get_am_ot_dates(m)
                 am_avail = am_ot and not am_blocked
                 pm_avail = False  # pm PAAC always blocks PM
             else:
