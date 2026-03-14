@@ -17,26 +17,55 @@ ROLE_COLOURS = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Meta helpers — coordinator + OT dates stored inside specialties field
+# Meta helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_coordinator_dates(staff_obj) -> list:
+def _parse_meta(staff_obj) -> dict:
     specs = staff_obj.specialties or ""
     if not specs.startswith("__meta__"):
-        return []
+        return {}
     try:
-        meta = json.loads(specs.split("\n", 1)[0].replace("__meta__", ""))
-        return [date.fromisoformat(d) for d in json.loads(meta.get("coord", "[]"))]
+        return json.loads(specs.split("\n", 1)[0].replace("__meta__", ""))
+    except Exception:
+        return {}
+
+def get_coordinator_dates(staff_obj) -> list:
+    try:
+        return [date.fromisoformat(d) for d in json.loads(_parse_meta(staff_obj).get("coord", "[]"))]
     except Exception:
         return []
 
 def get_ot_dates(staff_obj) -> list:
-    specs = staff_obj.specialties or ""
-    if not specs.startswith("__meta__"):
-        return []
     try:
-        meta = json.loads(specs.split("\n", 1)[0].replace("__meta__", ""))
-        return [date.fromisoformat(d) for d in json.loads(meta.get("ot_dates", "[]"))]
+        return [date.fromisoformat(d) for d in json.loads(_parse_meta(staff_obj).get("ot_dates", "[]"))]
+    except Exception:
+        return []
+
+def get_am_call_dates(staff_obj) -> list:
+    """Dates where colleague is on am 1/2/3 call (AM Emergency Team)."""
+    try:
+        return [date.fromisoformat(d) for d in json.loads(_parse_meta(staff_obj).get("am_call_dates", "[]"))]
+    except Exception:
+        return []
+
+def get_pm_paac_dates(staff_obj) -> list:
+    """Dates where colleague has pm PAAC duty."""
+    try:
+        return [date.fromisoformat(d) for d in json.loads(_parse_meta(staff_obj).get("pm_paac_dates", "[]"))]
+    except Exception:
+        return []
+
+def get_am_blocked_dates(staff_obj) -> list:
+    """Dates where AM is blocked (am meeting, am POMC, am sick, etc.)."""
+    try:
+        return [date.fromisoformat(d) for d in json.loads(_parse_meta(staff_obj).get("am_blocked", "[]"))]
+    except Exception:
+        return []
+
+def get_pm_blocked_dates(staff_obj) -> list:
+    """Dates where PM is blocked (pm meeting, pm PAAC, pm sick, etc.)."""
+    try:
+        return [date.fromisoformat(d) for d in json.loads(_parse_meta(staff_obj).get("pm_blocked", "[]"))]
     except Exception:
         return []
 
@@ -49,53 +78,100 @@ def get_real_specialties(staff_obj) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Custom roster parser — reads the department's native Excel format
+# Cell classifiers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _cell_is_ot(pm_val, am_val) -> bool:
+def _classify_cell(pm_val, am_val):
     """
-    Returns True if the colleague is available for OT assignment that day.
-
-    Available:
-      • Cell contains 'OT' (OT, OT*, am OT, pm OT, OT/Pain, etc.)
-      • Cell contains 'am 1 call', 'am 2 call', or 'am 3 call' exactly
-
-    NOT available (everything else including):
-      • 'pm 1/2/3 call'       (PM call only)
-      • '1st/2nd/3rd call'    (whole-day standby, not assignable)
-      • 'RH call'             (Resting Hours)
-      • Pain / AL / off / Sick / blank / etc.
+    Returns dict of booleans describing a colleague's availability for a date.
+    
+    Keys:
+      ot_available   – appears in OT pool for this date
+      am_call        – on am 1/2/3 call (AM Emergency Team; available but NOT assigned rooms)
+      pm_paac        – has pm PAAC (listed separately; NOT assigned to OT rooms)
+      am_blocked     – AM session unavailable (am meeting, am POMC, am sick etc.)
+      pm_blocked     – PM session unavailable (pm meeting, pm PAAC, pm sick etc.)
+      am_ot          – explicitly available for AM OT
+      pm_ot          – explicitly available for PM OT
     """
     pm = str(pm_val).strip() if pm_val else ""
     am = str(am_val).strip() if am_val else ""
-    combined = (pm + " " + am).upper()
+    pm_l = pm.lower()
+    am_l = am.lower()
+    combined_l = pm_l + " " + am_l
 
-    # OT in any form
-    if "OT" in combined:
-        return True
+    # ── AM call ───────────────────────────────────────────────────────────────
+    am_call = any(p in combined_l for p in ["am 1 call", "am 2 call", "am 3 call"])
 
-    pm_lower = pm.lower()
-    am_lower = am.lower()
+    # ── PM PAAC ───────────────────────────────────────────────────────────────
+    pm_paac = "pm paac" in pm_l or "pm paac" in am_l
 
-    # Only am 1/2/3 call are available — nothing else with "call"
-    AM_CALL_PATTERNS = ["am 1 call", "am 2 call", "am 3 call"]
-    for pat in AM_CALL_PATTERNS:
-        if pat in pm_lower or pat in am_lower:
-            return True
+    # ── AM blocked ────────────────────────────────────────────────────────────
+    AM_BLOCK_PATTERNS = ["am meeting", "am pomc", "am sick", "am paac", "am rh meeting"]
+    am_blocked = any(p in combined_l for p in AM_BLOCK_PATTERNS)
 
-    return False
+    # ── PM blocked ────────────────────────────────────────────────────────────
+    PM_BLOCK_PATTERNS = ["pm meeting", "pm paac", "pm sick", "pm off"]
+    pm_blocked = any(p in combined_l for p in PM_BLOCK_PATTERNS)
+
+    # ── Explicit AM/PM OT ──────────────────────────────────────────────────────
+    am_ot = "am ot" in am_l or "am ot" in pm_l
+    pm_ot = "pm ot" in pm_l or "pm ot" in am_l
+
+    # ── Whole-day OT ──────────────────────────────────────────────────────────
+    # "OT" alone (not prefixed with am/pm) means whole day
+    ot_whole = (
+        "OT" in pm.upper() and
+        "AM OT" not in pm.upper() and
+        "PM OT" not in pm.upper()
+    ) or (
+        "OT" in am.upper() and
+        "AM OT" not in am.upper() and
+        "PM OT" not in am.upper()
+    )
+
+    # Refine am_ot / pm_ot
+    if ot_whole and not pm_paac:
+        am_ot = am_ot or (not am_blocked)
+        pm_ot = pm_ot or (not pm_blocked)
+    
+    # am call colleagues are available AM (emergency team)
+    if am_call:
+        am_ot = True
+
+    # pm PAAC blocks PM
+    if pm_paac:
+        pm_ot = False
+        pm_blocked = True
+
+    # ot_available = appears in the pool at all
+    ot_available = am_ot or pm_ot or am_call
+
+    return {
+        "ot_available": ot_available,
+        "am_call":      am_call,
+        "pm_paac":      pm_paac,
+        "am_blocked":   am_blocked,
+        "pm_blocked":   pm_blocked,
+        "am_ot":        am_ot,
+        "pm_ot":        pm_ot,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Custom roster parser
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _cell_is_coordinator(pm_val, am_val) -> bool:
-    """OT* = on OT duty AND designated Day Coordinator for that date."""
     pm = str(pm_val).strip() if pm_val else ""
     am = str(am_val).strip() if am_val else ""
     return "OT*" in pm or "OT*" in am
+
 
 def parse_custom_roster(file_obj, consultant_rows, specialist_rows, trainee_rows=None):
     wb = openpyxl.load_workbook(file_obj, data_only=True)
     ws = wb.active
 
-    # Row 2 = dates
     date_to_col = {}
     for col in range(2, ws.max_column + 1):
         v = ws.cell(2, col).value
@@ -122,23 +198,50 @@ def parse_custom_roster(file_obj, consultant_rows, specialist_rows, trainee_rows
             continue
 
         am_row = name_row + 1
-        ot_by_date, coordinator_dates = {}, []
+        ot_by_date         = {}
+        am_ot_dates        = []
+        pm_ot_dates        = []
+        coordinator_dates  = []
+        am_call_dates      = []
+        pm_paac_dates      = []
+        am_blocked_dates   = []
+        pm_blocked_dates   = []
 
         for d, col in date_to_col.items():
             pm_val = ws.cell(name_row, col).value
             am_val = ws.cell(am_row,   col).value
-            ot_by_date[d] = _cell_is_ot(pm_val, am_val)
+
+            flags = _classify_cell(pm_val, am_val)
+            ot_by_date[d] = flags["ot_available"]
+
+            if flags["ot_available"]:
+                if flags["am_ot"]:  am_ot_dates.append(d)
+                if flags["pm_ot"]:  pm_ot_dates.append(d)
+            if flags["am_call"]:    am_call_dates.append(d)
+            if flags["pm_paac"]:    pm_paac_dates.append(d)
+            if flags["am_blocked"]: am_blocked_dates.append(d)
+            if flags["pm_blocked"]: pm_blocked_dates.append(d)
+
             if role == "Consultant" and _cell_is_coordinator(pm_val, am_val):
                 coordinator_dates.append(d)
 
         results.append({
-            "name": name, "role": role,
-            "ot_by_date": ot_by_date,
+            "name":             name,
+            "role":             role,
+            "ot_by_date":       ot_by_date,
+            "am_ot_dates":      am_ot_dates,
+            "pm_ot_dates":      pm_ot_dates,
             "coordinator_dates": coordinator_dates,
-            "pregnant": False, "specialties": "",
+            "am_call_dates":    am_call_dates,
+            "pm_paac_dates":    pm_paac_dates,
+            "am_blocked_dates": am_blocked_dates,
+            "pm_blocked_dates": pm_blocked_dates,
+            "pregnant":         False,
+            "specialties":      "",
         })
 
     return results, sorted(date_to_col.keys())
+
 
 def _upsert_parsed_staff(parsed: list):
     added = updated = 0
@@ -155,9 +258,20 @@ def _upsert_parsed_staff(parsed: list):
                 "ot_fri": weekday_ot[4], "ot_sat": weekday_ot[5],
                 "ot_sun": weekday_ot[6],
             }
-            coord_str  = json.dumps([str(d) for d in p.get("coordinator_dates", [])])
-            ot_str     = json.dumps([str(d) for d, v in p["ot_by_date"].items() if v])
-            meta_prefix = f"__meta__{json.dumps({'coord': coord_str, 'ot_dates': ot_str})}\n"
+
+            def _ds(lst): return json.dumps([str(d) for d in lst])
+
+            meta = json.dumps({
+                "coord":         _ds(p.get("coordinator_dates", [])),
+                "ot_dates":      _ds([d for d, v in p["ot_by_date"].items() if v]),
+                "am_ot_dates":   _ds(p.get("am_ot_dates", [])),
+                "pm_ot_dates":   _ds(p.get("pm_ot_dates", [])),
+                "am_call_dates": _ds(p.get("am_call_dates", [])),
+                "pm_paac_dates": _ds(p.get("pm_paac_dates", [])),
+                "am_blocked":    _ds(p.get("am_blocked_dates", [])),
+                "pm_blocked":    _ds(p.get("pm_blocked_dates", [])),
+            })
+            meta_prefix = f"__meta__{meta}\n"
 
             existing = s.query(Staff).filter(Staff.name == name).first()
             if existing:
@@ -166,10 +280,9 @@ def _upsert_parsed_staff(parsed: list):
                 for k, v in ot_vals.items():
                     setattr(existing, k, v)
                 existing.active = True
-                # Preserve human-written specialties
                 old = existing.specialties or ""
-                human_part = old.split("\n", 1)[1].strip() if old.startswith("__meta__") else old.strip()
-                existing.specialties = meta_prefix + human_part
+                human = old.split("\n", 1)[1].strip() if old.startswith("__meta__") else old.strip()
+                existing.specialties = meta_prefix + human
                 updated += 1
             else:
                 m = Staff(name=name, role=p["role"], pregnant=False,
@@ -199,6 +312,7 @@ def _save_staff_edits(staff_id, role, specialties, pregnant, ot_vals):
                 setattr(m, k, v)
             s.commit()
 
+
 def _render_edit_panel(staff_id, staff_list):
     m = next((x for x in staff_list if x.id == staff_id), None)
     if not m:
@@ -207,12 +321,12 @@ def _render_edit_panel(staff_id, staff_list):
     real_specs  = get_real_specialties(m)
     coord_dates = get_coordinator_dates(m)
 
-    badges = f'<span style="background:{colour}22;color:{colour};border:1px solid {colour};border-radius:4px;padding:2px 8px;font-size:.75rem;">{m.role}</span>'
+    badges = (f'<span style="background:{colour}22;color:{colour};border:1px solid {colour};'
+              f'border-radius:4px;padding:2px 8px;font-size:.75rem;">{m.role}</span>')
     if m.pregnant:
         badges += ' <span class="badge-warn">⚠ Pregnant</span>'
     if coord_dates:
         badges += f' <span class="badge-ok">⭐ Coordinator {len(coord_dates)} day(s)</span>'
-
     st.markdown(
         f'<div class="card card-accent" style="border-left-color:{colour};">'
         f'<strong style="font-size:1.05rem;">{m.name}</strong> {badges}</div>',
@@ -245,7 +359,7 @@ def _render_edit_panel(staff_id, staff_list):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Main show() — tabs never return early so all 3 tabs always render
+# Main show()
 # ─────────────────────────────────────────────────────────────────────────────
 
 def show():
@@ -256,26 +370,21 @@ def show():
 
     tab1, tab2, tab3 = st.tabs(["📋 View Roster", "📤 Upload Roster", "➕ Add Staff"])
 
-    # ── TAB 1: View & edit roster ─────────────────────────────────────────────
     with tab1:
         st.markdown('<div class="section-header">Active Roster</div>', unsafe_allow_html=True)
         st.caption("✏️ = edit  ·  🗑 = remove from roster")
-
         col_filter, col_role = st.columns(2)
         search = col_filter.text_input("🔍 Search by name", placeholder="e.g. Chan")
         role_f = col_role.selectbox("Filter by role", ["All"] + ROLES)
-
         with SessionLocal() as s:
             q = s.query(Staff).filter(Staff.active == True)
             if search:          q = q.filter(Staff.name.ilike(f"%{search}%"))
             if role_f != "All": q = q.filter(Staff.role == role_f)
             staff_list = q.order_by(Staff.name).all()
 
-        # ── Empty state (no return! just show message) ────────────────────────
         if not staff_list:
-            st.info("No staff in the database yet. Use the **Upload Roster** tab to import your department Excel file.")
+            st.info("No staff found. Use the **Upload Roster** tab to import your Excel file.")
         else:
-            # Header
             h = st.columns([2.2, 1.4, 2.0, 0.8, 1.8, 0.5, 0.5])
             for lbl, col in zip(["Name","Role","Specialties","Pregnant","OT Days","",""], h):
                 col.markdown(f"<small><b>{lbl}</b></small>", unsafe_allow_html=True)
@@ -297,30 +406,23 @@ def show():
                 row[4].markdown(f'<small>{", ".join(ot_days) if ot_days else "—"}</small>',
                                 unsafe_allow_html=True)
 
-                # ✏️ toggle
                 if row[5].button("✕" if is_editing else "✏️",
                                  key=f"editbtn_{m.id}", use_container_width=True):
                     st.session_state.editing_staff_id  = None if is_editing else m.id
                     st.session_state.confirm_delete_id = None
                     st.rerun()
-
-                # 🗑 delete
                 if row[6].button("🗑", key=f"delbtn_{m.id}", use_container_width=True):
                     st.session_state.confirm_delete_id = m.id
                     st.session_state.editing_staff_id  = None
                     st.rerun()
 
-                # Delete confirmation strip
                 if st.session_state.confirm_delete_id == m.id:
                     cc = st.columns([3, 1, 1])
                     cc[0].warning(f"⚠ Permanently remove **{m.name}**?")
-                    if cc[1].button("✓ Yes", key=f"conf_{m.id}",
-                                    type="primary", use_container_width=True):
+                    if cc[1].button("✓ Yes", key=f"conf_{m.id}", type="primary", use_container_width=True):
                         with SessionLocal() as s:
                             mem = s.get(Staff, m.id)
-                            if mem:
-                                mem.active = False
-                                s.commit()
+                            if mem: mem.active = False; s.commit()
                         st.session_state.confirm_delete_id = None
                         st.success(f"✓ {m.name} removed.")
                         st.rerun()
@@ -328,15 +430,13 @@ def show():
                         st.session_state.confirm_delete_id = None
                         st.rerun()
 
-                # Edit panel
                 if is_editing:
                     with st.container():
                         st.markdown("")
                         _render_edit_panel(m.id, staff_list)
                     st.divider()
 
-            # Legend + role tiles
-            st.caption("⭐ = designated Day Coordinator on one or more dates this period")
+            st.caption("⭐ = designated Day Coordinator on one or more dates")
             st.markdown("---")
             st.markdown('<div class="section-header">Role Distribution</div>', unsafe_allow_html=True)
             tcols = st.columns(4)
@@ -347,7 +447,6 @@ def show():
                     f'<div class="metric-tile"><div class="val" style="color:{c};">{count}</div>'
                     f'<div class="lbl">{role}</div></div>', unsafe_allow_html=True)
 
-            # Individual stats
             with st.expander("📊 View individual stats"):
                 chosen = st.selectbox("Select colleague", [m.name for m in staff_list])
                 cm = next((m for m in staff_list if m.name == chosen), None)
@@ -366,108 +465,74 @@ def show():
                                 st.bar_chart(pd.DataFrame(list(sc.items()),
                                              columns=["Type","Count"]).set_index("Type"))
 
-    # ── TAB 2: Upload department Excel ────────────────────────────────────────
     with tab2:
         st.markdown('<div class="section-header">Upload Department Roster (Excel)</div>',
                     unsafe_allow_html=True)
         st.markdown("""
         <div class="card card-accent">
-        <strong>Your department's native roster format is fully supported:</strong><br><br>
-        • <b>Row 1</b> – Day names &nbsp;|&nbsp; <b>Row 2</b> – Dates<br>
-        • <b>Column A</b> – Colleague name (every other row; row below = AM entries)<br>
-        • Cell contains <code>OT</code> → <b>available for OT</b> that day<br>
-        • Cell contains <code>OT*</code> → available <b>AND designated Day Coordinator ⭐</b><br>
-        • <b>Rows 4–16</b> → Consultant &nbsp;|&nbsp; <b>Rows 18–42</b> → Specialist &nbsp;|&nbsp; <b>Rows 44–92</b> → Trainee<br>
-        • Day Coordinators are excluded from room assignment by the optimiser
+        <strong>Fully supported patterns:</strong><br><br>
+        • <code>OT</code>, <code>OT*</code>, <code>am OT</code>, <code>pm OT</code> → OT available (full/half day)<br>
+        • <code>am 1/2/3 call</code> → AM Emergency Team (not assigned to rooms)<br>
+        • <code>pm PAAC</code> → listed separately, not assigned to OT rooms<br>
+        • <code>am meeting</code>, <code>am POMC</code>, <code>am sick</code> → AM blocked<br>
+        • <code>pm meeting</code>, <code>pm PAAC</code>, <code>pm sick</code> → PM blocked<br>
+        • <b>Rows 4–16</b> → Consultant · <b>Rows 18–42</b> → Specialist · <b>Rows 44–92</b> → Trainee
         </div>
         """, unsafe_allow_html=True)
 
-        with st.expander("⚙️ Adjust row boundaries (only if your file layout differs)"):
+        with st.expander("⚙️ Adjust row boundaries"):
             col_a, col_b, col_c = st.columns(3)
-            cons_start = col_a.number_input("Consultant — first name row", value=4,  min_value=1)
-            cons_end   = col_a.number_input("Consultant — last name row",  value=16, min_value=1)
-            spec_start = col_b.number_input("Specialist — first name row", value=18, min_value=1)
-            spec_end   = col_b.number_input("Specialist — last name row",  value=42, min_value=1)
-            train_start = col_c.number_input("Trainee — first name row",   value=44, min_value=1)
-            train_end   = col_c.number_input("Trainee — last name row",    value=92, min_value=1)
+            cons_start  = col_a.number_input("Consultant — first row", value=4,  min_value=1)
+            cons_end    = col_a.number_input("Consultant — last row",  value=16, min_value=1)
+            spec_start  = col_b.number_input("Specialist — first row", value=18, min_value=1)
+            spec_end    = col_b.number_input("Specialist — last row",  value=42, min_value=1)
+            train_start = col_c.number_input("Trainee — first row",    value=44, min_value=1)
+            train_end   = col_c.number_input("Trainee — last row",     value=92, min_value=1)
 
         cons_rows  = list(range(int(cons_start),  int(cons_end)  + 1, 2))
         spec_rows  = list(range(int(spec_start),  int(spec_end)  + 1, 2))
         train_rows = list(range(int(train_start), int(train_end) + 1, 2))
 
-        uploaded = st.file_uploader("Choose your department roster (.xlsx / .xls)",
-                                    type=["xlsx", "xls"])
-
+        uploaded = st.file_uploader("Choose department roster (.xlsx/.xls)", type=["xlsx","xls"])
         if uploaded:
             try:
                 parsed, all_dates = parse_custom_roster(uploaded, cons_rows, spec_rows, train_rows)
             except Exception as e:
-                st.error(f"Could not parse file: {e}")
+                st.error(f"Could not parse: {e}")
             else:
-                coordinators = [(p["name"], p["coordinator_dates"])
-                                for p in parsed if p["coordinator_dates"]]
+                coordinators = [(p["name"], p["coordinator_dates"]) for p in parsed if p["coordinator_dates"]]
+                am_call_total = sum(len(p["am_call_dates"]) for p in parsed)
+                pm_paac_total = sum(len(p["pm_paac_dates"]) for p in parsed)
                 st.success(
-                    f"✓ Parsed **{len(parsed)}** colleagues · "
-                    f"**{len(all_dates)}** days "
+                    f"✓ **{len(parsed)}** colleagues · **{len(all_dates)}** days "
                     f"({min(all_dates).strftime('%d %b')} → {max(all_dates).strftime('%d %b %Y')}) · "
-                    f"**{len(coordinators)}** coordinator designation(s) found"
+                    f"**{len(coordinators)}** coordinator(s) · "
+                    f"**{am_call_total}** am-call entries · **{pm_paac_total}** pm-PAAC entries"
                 )
-
                 if coordinators:
-                    with st.expander(f"⭐ Day Coordinators detected ({len(coordinators)} consultants)"):
+                    with st.expander(f"⭐ Day Coordinators ({len(coordinators)})"):
                         for name, dates in coordinators:
-                            st.markdown(
-                                f"**{name}** — coordinator on: "
-                                + ", ".join(d.strftime("%d %b") for d in sorted(dates))
-                            )
+                            st.markdown(f"**{name}** — " + ", ".join(d.strftime("%d %b") for d in sorted(dates)))
 
-                # Preview
                 preview_rows = []
                 for p in parsed[:12]:
                     ot_days = [str(d) for d, v in p["ot_by_date"].items() if v]
                     preview_rows.append({
-                        "Name": p["name"],
-                        "Role": p["role"],
+                        "Name": p["name"], "Role": p["role"],
+                        "OT days": len(ot_days),
+                        "AM call days": len(p["am_call_dates"]),
+                        "PM PAAC days": len(p["pm_paac_dates"]),
                         "Coordinator days": len(p["coordinator_dates"]),
-                        "OT days": (f"{len(ot_days)} "
-                                    f"({', '.join(d[-5:] for d in ot_days[:4])}"
-                                    f"{'…' if len(ot_days) > 4 else ''})"),
                     })
-                st.markdown("**Preview (first 12 colleagues):**")
+                st.markdown("**Preview (first 12):**")
                 st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
 
-                st.info("💡 After import, add specialties (neuro, paeds, etc.) "
-                        "per person using ✏️ in the View Roster tab.")
-
+                st.info("💡 Add specialties per person using ✏️ in View Roster after import.")
                 if st.button("✅ Import into Database", type="primary"):
                     added, updated = _upsert_parsed_staff(parsed)
-                    st.success(f"✓ Import complete: **{added}** added · **{updated}** updated.")
+                    st.success(f"✓ {added} added · {updated} updated.")
                     st.rerun()
 
-        st.markdown("---")
-        if st.button("📥 Download blank sample template"):
-            sample = {
-                "Name":        ["Dr. Alice Chen","Dr. Bob Patel","Dr. Carol Mensah"],
-                "Role":        ["Consultant","Consultant","Specialist"],
-                "Pregnant":    ["No","No","No"],
-                "Specialties": ["neuro, paeds","colorectal","obstetric"],
-                "OT_Mon":      ["Yes","Yes","Yes"],
-                "OT_Tue":      ["Yes","No","Yes"],
-                "OT_Wed":      ["No","Yes","No"],
-                "OT_Thu":      ["Yes","Yes","Yes"],
-                "OT_Fri":      ["Yes","Yes","No"],
-                "OT_Sat":      ["No","No","No"],
-                "OT_Sun":      ["No","No","No"],
-            }
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as w:
-                pd.DataFrame(sample).to_excel(w, index=False, sheet_name="Roster")
-            buf.seek(0)
-            st.download_button("⬇️ Download sample_roster.xlsx", data=buf,
-                               file_name="sample_roster.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-    # ── TAB 3: Add individual colleague ──────────────────────────────────────
     with tab3:
         st.markdown('<div class="section-header">Add New Colleague Manually</div>',
                     unsafe_allow_html=True)
@@ -479,8 +544,7 @@ def show():
             pregnant = col2.checkbox("Pregnant")
             st.markdown("**OT Days:**")
             day_cols_ui = st.columns(7)
-            ot_sel = {d: day_cols_ui[i].checkbox(d, key=f"add_ot_{d}")
-                      for i, d in enumerate(DAYS)}
+            ot_sel = {d: day_cols_ui[i].checkbox(d, key=f"add_ot_{d}") for i, d in enumerate(DAYS)}
             if st.form_submit_button("➕ Add Colleague", type="primary"):
                 if not name.strip():
                     st.error("Name is required.")
@@ -489,14 +553,12 @@ def show():
                         if s.query(Staff).filter(Staff.name == name.strip()).first():
                             st.warning(f"'{name}' already exists.")
                         else:
-                            m = Staff(
-                                name=name.strip(), role=role,
-                                pregnant=pregnant, specialties=specs.strip(),
-                                ot_mon=ot_sel["Mon"], ot_tue=ot_sel["Tue"],
-                                ot_wed=ot_sel["Wed"], ot_thu=ot_sel["Thu"],
-                                ot_fri=ot_sel["Fri"], ot_sat=ot_sel["Sat"],
-                                ot_sun=ot_sel["Sun"],
-                            )
+                            m = Staff(name=name.strip(), role=role, pregnant=pregnant,
+                                      specialties=specs.strip(),
+                                      ot_mon=ot_sel["Mon"], ot_tue=ot_sel["Tue"],
+                                      ot_wed=ot_sel["Wed"], ot_thu=ot_sel["Thu"],
+                                      ot_fri=ot_sel["Fri"], ot_sat=ot_sel["Sat"],
+                                      ot_sun=ot_sel["Sun"])
                             s.add(m)
                             s.flush()
                             s.add(StaffStats(staff_id=m.id))
