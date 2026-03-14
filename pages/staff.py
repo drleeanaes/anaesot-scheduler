@@ -145,7 +145,7 @@ def _classify_cell(pm_val, am_val):
         pm_blocked = True
 
     # ot_available = appears in the pool at all
-    ot_available = am_ot or pm_ot or am_call
+    ot_available = am_ot or pm_ot or am_call or pm_paac  # pm_paac always enter pool to show in PAAC panel
 
     return {
         "ot_available": ot_available,
@@ -252,6 +252,9 @@ def _upsert_parsed_staff(parsed: list):
             for d, is_on in p["ot_by_date"].items():
                 if is_on:
                     weekday_ot[d.weekday()] = True
+            # Also mark weekdays where colleague has pm_paac (so they enter the pool)
+            for d in p.get("pm_paac_dates", []):
+                weekday_ot[d.weekday()] = True
             ot_vals = {
                 "ot_mon": weekday_ot[0], "ot_tue": weekday_ot[1],
                 "ot_wed": weekday_ot[2], "ot_thu": weekday_ot[3],
@@ -261,9 +264,15 @@ def _upsert_parsed_staff(parsed: list):
 
             def _ds(lst): return json.dumps([str(d) for d in lst])
 
+            # ot_dates includes pm_paac dates so those colleagues enter the scheduler pool
+            all_active_dates = [
+                d for d, v in p["ot_by_date"].items() if v
+            ] + [d for d in p.get("pm_paac_dates", [])
+                 if d not in [x for x, v in p["ot_by_date"].items() if v]]
+
             meta = json.dumps({
                 "coord":         _ds(p.get("coordinator_dates", [])),
-                "ot_dates":      _ds([d for d, v in p["ot_by_date"].items() if v]),
+                "ot_dates":      _ds(all_active_dates),
                 "am_ot_dates":   _ds(p.get("am_ot_dates", [])),
                 "pm_ot_dates":   _ds(p.get("pm_ot_dates", [])),
                 "am_call_dates": _ds(p.get("am_call_dates", [])),

@@ -242,20 +242,44 @@ def _generate_draft(all_day, rooms, coordinator_name, specialty_prefs, consult_c
             }
             continue
 
-        # Normal room: AM lead + asst, PM lead + asst
+        # Normal room: AM lead + optional asst, PM lead + optional asst
+        # Preference: if AM lead is also PM available, keep them for PM lead (continuity)
         stype_str = st.session_state.room_stype.get(room, "General")
 
         am_lead_cd = _pick_lead(am_pool, am_used, coordinator_name, stype_str, specialty_prefs)
         am_lead    = am_lead_cd.staff.name if am_lead_cd else "— Unassigned —"
 
+        # Try to reuse AM lead for PM (same person, same room) if they are PM available
+        pm_lead_cd = None
+        if am_lead_cd:
+            am_lead_in_pm = next((cd for cd in pm_pool
+                                  if cd.staff.id == am_lead_cd.staff.id
+                                  and cd.staff.id not in pm_used), None)
+            if am_lead_in_pm:
+                pm_lead_cd = am_lead_in_pm
+                pm_used.add(am_lead_in_pm.staff.id)
+
+        if pm_lead_cd is None:
+            pm_lead_cd = _pick_lead(pm_pool, pm_used, coordinator_name, stype_str, specialty_prefs)
+        pm_lead = pm_lead_cd.staff.name if pm_lead_cd else "— Unassigned —"
+
+        # Try to reuse AM asst for PM asst too (same pair, same room)
         am_asst_cd = _pick_asst(am_pool, am_used, coordinator_name)
         am_asst    = am_asst_cd.staff.name if am_asst_cd else "— Unassigned —"
 
-        pm_lead_cd = _pick_lead(pm_pool, pm_used, coordinator_name, stype_str, specialty_prefs)
-        pm_lead    = pm_lead_cd.staff.name if pm_lead_cd else "— Unassigned —"
+        pm_asst_cd = None
+        if am_asst_cd:
+            am_asst_in_pm = next((cd for cd in pm_pool
+                                  if cd.staff.id == am_asst_cd.staff.id
+                                  and cd.staff.id not in pm_used), None)
+            if am_asst_in_pm:
+                pm_asst_cd = am_asst_in_pm
+                pm_used.add(am_asst_in_pm.staff.id)
 
-        pm_asst_cd = _pick_asst(pm_pool, pm_used, coordinator_name)
-        pm_asst    = pm_asst_cd.staff.name if pm_asst_cd else "— Unassigned —"
+        if pm_asst_cd is None:
+            pm_asst_cd = _pick_asst(pm_pool, pm_used, coordinator_name)
+        # Assistant is optional — leave blank if nobody available
+        pm_asst = pm_asst_cd.staff.name if pm_asst_cd else "— Unassigned —"
 
         ma[room] = {
             "am_lead": am_lead, "am_asst": am_asst,
@@ -356,7 +380,14 @@ def show():
 
     if not all_day:
         st.warning(f"No staff available for {target_date.strftime('%A, %d %b %Y')}.")
+        st.info("💡 If you expect staff to be available, go to **Staff Management → Upload Roster** "
+                "and re-import your Excel file to refresh the database.")
         return
+
+    # Warn if the pool looks unexpectedly small (possible stale data)
+    pm_paac_shown = [cd for cd in all_day if cd.pm_paac]
+    if not pm_paac_shown and target_date.weekday() < 5:  # weekday
+        pass  # No warning — could be a valid day with no PAAC
 
     # ── AM Emergency Team ─────────────────────────────────────────────────────
     am_call_team = [cd for cd in all_day if cd.am_call]
