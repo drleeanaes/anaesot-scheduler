@@ -18,6 +18,56 @@ from database import (
 from optimizer import StaffMember, RoomCase, solve_ortools
 from pages.rooms import get_room_special_types, SPECIAL_TYPE_LABELS
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Weekly surgery schedule — Mon to Fri (from theatre table)
+# Trauma and Emergency are always appended as fixed extra slots every weekday
+# C7-OBS is always Obstetric AM only on weekdays
+# ─────────────────────────────────────────────────────────────────────────────
+WEEKLY_SCHEDULE = {
+    # Each day: "am" and "pm" list surgery types for elective rooms
+    # Trauma and Emergency are always added as extra slots (fixed)
+    # Obstetric (C7-OBS) runs whole day Mon / Wed / Fri only
+    "Monday": {
+        "am": ["Orthopaedic", "Gynaecology", "ENT", "Ophthalmology",
+               "Upper GI", "Vascular", "General Surgery"],
+        "pm": ["Orthopaedic", "Gynaecology", "ENT", "Ophthalmology",
+               "Upper GI", "Vascular", "General Surgery"],
+        "obs": True,
+    },
+    "Tuesday": {
+        "am": ["Neurosurgery", "Orthopaedic", "General Surgery", "Upper GI",
+               "Colorectal", "Ophthalmology", "Vascular"],
+        "pm": ["Neurosurgery", "Orthopaedic", "General Surgery", "Colorectal",
+               "Hepatobiliary", "Ophthalmology", "Vascular"],
+        "obs": False,
+    },
+    "Wednesday": {
+        "am": ["Orthopaedic", "Gynaecology", "Urology", "Ophthalmology",
+               "General Surgery", "OMFS", "Hepatobiliary"],
+        "pm": ["Orthopaedic", "Gynaecology", "Urology", "Ophthalmology",
+               "Hepatobiliary", "OMFS"],
+        "obs": True,
+    },
+    "Thursday": {
+        "am": ["Neurosurgery", "Orthopaedic", "ENT", "Colorectal",
+               "Hepatobiliary", "General Surgery"],
+        "pm": ["Neurosurgery", "Orthopaedic", "ENT", "Colorectal",
+               "Hepatobiliary", "General Surgery"],
+        "obs": False,
+    },
+    "Friday": {
+        "am": ["Orthopaedic", "Gynaecology", "General Surgery", "Urology", "Ophthalmology"],
+        "pm": ["Orthopaedic", "Gynaecology", "General Surgery", "Urology", "Ophthalmology"],
+        "obs": True,
+    },
+}
+# Always added as fixed extra slots every weekday
+FIXED_EXTRA_SLOTS = ["Trauma", "Emergency"]
+# The OBS room name — only active Mon/Wed/Fri
+OBS_ROOM = "C7-OBS"
+# Days when OBS runs
+OBS_DAYS = {"Monday", "Wednesday", "Friday"}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-colleague availability for a specific date
@@ -252,9 +302,10 @@ def _check_constraints(manual_assign, all_day, room_xray, coordinator_name, spec
 # Draft generation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _generate_draft(all_day, rooms, coordinator_name, specialty_prefs, consult_criteria, seed=0):
+def _generate_draft(all_day, rooms, coordinator_name, specialty_prefs, consult_criteria,
+                    seed=0, target_date=None):
     """
-    Build draft assignments respecting AM/PM availability.
+    Build draft assignments respecting AM/PM availability and per-day surgery types.
     Returns manual_assign dict and consult name.
     """
     special_types = get_room_special_types()
@@ -285,6 +336,15 @@ def _generate_draft(all_day, rooms, coordinator_name, specialty_prefs, consult_c
                         "_note":"🔴 EOT — assign manually"}
             continue
 
+        # C7-OBS: only scheduled Mon/Wed/Fri
+        if room == OBS_ROOM:
+            weekday = target_date.strftime("%A") if target_date else "Monday"
+            if weekday not in OBS_DAYS:
+                ma[room] = {"am_lead":"— Unassigned —","am_asst":"— Unassigned —",
+                            "pm_lead":"— Unassigned —","pm_asst":"— Unassigned —",
+                            "_note":"⬜ Obstetric not scheduled today"}
+                continue
+
         if stype_room == "trauma":
             # AM: pick Senior Trainee solo
             am_lead = _pick_solo(am_pool, am_used, coordinator_name, prefer_role="Senior Trainee")
@@ -297,8 +357,13 @@ def _generate_draft(all_day, rooms, coordinator_name, specialty_prefs, consult_c
             continue
 
         # Normal room: AM lead + optional asst, PM lead + optional asst
-        # Preference: if AM lead is also PM available, keep them for PM lead (continuity)
-        stype_str = st.session_state.room_stype.get(room, "General")
+        # Use AM surgery type for AM specialty preference, PM type for PM specialty preference
+        weekday      = target_date.strftime("%A") if target_date else "Monday"
+        day_sched    = WEEKLY_SCHEDULE.get(weekday, {"am":[], "pm":[]})
+        stype_str    = st.session_state.room_stype.get(room, "General Surgery")
+        # PM may have a different specialty list — find best match
+        pm_types_day = day_sched.get("pm", [])
+        pm_stype_str = stype_str  # default same; PM specialty matching uses this
 
         # Pick AM lead (Specialist/Consultant only)
         am_lead_cd = _pick_lead(am_pool, am_used, coordinator_name, stype_str, specialty_prefs)
@@ -318,7 +383,7 @@ def _generate_draft(all_day, rooms, coordinator_name, specialty_prefs, consult_c
                 pm_lead_cd = same_in_pm
                 pm_used.add(same_in_pm.staff.id)
         if pm_lead_cd is None:
-            pm_lead_cd = _pick_lead(pm_pool, pm_used, coordinator_name, stype_str, specialty_prefs)
+            pm_lead_cd = _pick_lead(pm_pool, pm_used, coordinator_name, pm_stype_str, specialty_prefs)
         pm_lead = pm_lead_cd.staff.name if pm_lead_cd else "— Unassigned —"
 
         # PM Assistant logic:
@@ -574,24 +639,99 @@ def show():
     if "reshuffle_seed" not in st.session_state: st.session_state.reshuffle_seed = 0
 
     # ── Step 1: Surgery types & X-ray ─────────────────────────────────────────
-    st.markdown('<div class="section-header">Step 1 — Assign Surgery Types & X-ray Flags</div>',
+    # ── Build today's surgery list from the weekly schedule ─────────────────
+    weekday_name = target_date.strftime("%A")   # Monday, Tuesday …
+    day_schedule = WEEKLY_SCHEDULE.get(weekday_name)   # None on weekends
+
+    st.markdown("<div class='section-header'>Step 1 — Today's Surgery Lists</div>",
                 unsafe_allow_html=True)
+
+    if not day_schedule:
+        st.info(f"{weekday_name} is not a scheduled OT day (no standard lists). "
+                "You can still generate a draft with manual room assignments below.")
+        # On weekends just show Trauma + Emergency
+        day_schedule = {"am": [], "pm": []}
+
+    # Combine AM+PM unique types for display, plus fixed extras
+    am_types = day_schedule["am"]
+    pm_types = day_schedule["pm"]
+    obs_today = weekday_name in OBS_DAYS
+    all_types_today = list(dict.fromkeys(
+        am_types + pm_types + FIXED_EXTRA_SLOTS +
+        (["Obstetric"] if obs_today else [])
+    ))
+
+    # Show the day's schedule as a clean summary card
+    am_only = [t for t in am_types if t not in pm_types]
+    pm_only = [t for t in pm_types if t not in am_types]
+    both    = [t for t in am_types if t in pm_types]
+
+    obs_note = "C7-OBS: Obstetric (whole day)" if obs_today else "C7-OBS: not scheduled today"
+    obs_colour = "#00d4aa" if obs_today else "#8b949e"
+
+    summary_lines = []
+    if both:
+        summary_lines.append(f'<span style="color:#00d4aa;">AM + PM:</span> {", ".join(both)}')
+    if am_only:
+        summary_lines.append(f'<span style="color:#1f8ef1;">AM only:</span> {", ".join(am_only)}')
+    if pm_only:
+        summary_lines.append(f'<span style="color:#f59e0b;">PM only:</span> {", ".join(pm_only)}')
+    summary_lines.append(f'<span style="color:#ef4444;">Always:</span> {", ".join(FIXED_EXTRA_SLOTS)}')
+    summary_lines.append(f'<span style="color:{obs_colour};">OBS:</span> {obs_note}')
+
+    st.markdown(
+        "<div class='card card-accent'><strong>Today's standard lists:</strong><br>"
+        + "<br>".join(summary_lines) + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Auto-populate room_stype on first load for this date
+    date_key = f"sched_date_{target_date}"
+    if date_key not in st.session_state:
+        st.session_state.room_stype    = {}
+        st.session_state.room_xray     = {}
+        st.session_state.manual_assign = {}
+        st.session_state.draft         = None
+        st.session_state[date_key]     = True
+
+        # Distribute AM surgery types across normal rooms in order
+        am_queue = list(am_types)
+        for room in all_rooms:
+            stype_room = special_types.get(room, "normal")
+            if room == OBS_ROOM:
+                # Obstetric whole day Mon/Wed/Fri; leave blank other days
+                st.session_state.room_stype[room] = "Obstetric" if obs_today else "— Not scheduled —"
+            elif stype_room == "trauma":
+                st.session_state.room_stype[room] = "Trauma"
+            elif stype_room == "eot":
+                st.session_state.room_stype[room] = "Emergency"
+            elif am_queue:
+                st.session_state.room_stype[room] = am_queue.pop(0)
+            else:
+                st.session_state.room_stype[room] = surg_types[0] if surg_types else "General Surgery"
+
+    # Editable grid — user can still override any room
+    st.markdown("**Override surgery type or X-ray flag for any room:**")
     hdr = st.columns([1.2, 1.8, 0.8, 0.9])
-    for lbl, c in zip(["Room","Surgery / Case Type","X-ray?","Room Type"], hdr):
+    for lbl, c in zip(["Room", "Surgery / Case Type", "X-ray?", "Room Type"], hdr):
         c.markdown(f"**{lbl}**")
+
+    all_stype_opts = list(dict.fromkeys(all_types_today + surg_types))  # today's first, then rest
 
     for room in all_rooms:
         stype_room = special_types.get(room, "normal")
         label, colour = SPECIAL_TYPE_LABELS.get(stype_room, SPECIAL_TYPE_LABELS["normal"])
         cols = st.columns([1.2, 1.8, 0.8, 0.9])
         cols[0].markdown(f"`{room}`")
-        cur = st.session_state.room_stype.get(room, surg_types[0] if surg_types else "General")
-        idx = surg_types.index(cur) if cur in surg_types else 0
-        sv  = cols[1].selectbox("", surg_types, index=idx, key=f"stype_{room}", label_visibility="collapsed")
+        cur = st.session_state.room_stype.get(room, all_stype_opts[0] if all_stype_opts else "General Surgery")
+        idx = all_stype_opts.index(cur) if cur in all_stype_opts else 0
+        sv  = cols[1].selectbox("", all_stype_opts, index=idx,
+                                key=f"stype_{room}", label_visibility="collapsed")
         xv  = cols[2].checkbox("", value=st.session_state.room_xray.get(room, False),
                                key=f"xray_{room}", label_visibility="collapsed")
-        cols[3].markdown(f'<span style="color:{colour};font-weight:600;font-size:.85rem;">{label}</span>',
-                         unsafe_allow_html=True)
+        cols[3].markdown(
+            f'<span style="color:{colour};font-weight:600;font-size:.85rem;">{label}</span>',
+            unsafe_allow_html=True)
         st.session_state.room_stype[room] = sv
         st.session_state.room_xray[room]  = xv
 
@@ -613,7 +753,8 @@ def show():
         with st.spinner("Generating draft…"):
             ma, consult_name = _generate_draft(
                 all_day, all_rooms, coordinator_name,
-                specialty_prefs, consult_criteria, seed=0
+                specialty_prefs, consult_criteria, seed=0,
+                target_date=target_date,
             )
         st.session_state.manual_assign    = ma
         st.session_state["consult_manual"] = consult_name
@@ -626,7 +767,8 @@ def show():
         with st.spinner(f"Reshuffling (combination #{seed})…"):
             ma, consult_name = _generate_draft(
                 all_day, all_rooms, coordinator_name,
-                specialty_prefs, consult_criteria, seed=seed
+                specialty_prefs, consult_criteria, seed=seed,
+                target_date=target_date,
             )
         st.session_state.manual_assign    = ma
         st.session_state["consult_manual"] = consult_name
