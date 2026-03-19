@@ -638,68 +638,33 @@ def show():
     if "draft"        not in st.session_state: st.session_state.draft        = None
     if "reshuffle_seed" not in st.session_state: st.session_state.reshuffle_seed = 0
 
-    # ── Step 1: Surgery types & X-ray ─────────────────────────────────────────
-    # ── Build today's surgery list from the weekly schedule ─────────────────
-    weekday_name = target_date.strftime("%A")   # Monday, Tuesday …
-    day_schedule = WEEKLY_SCHEDULE.get(weekday_name)   # None on weekends
-
-    st.markdown("<div class='section-header'>Step 1 — Today's Surgery Lists</div>",
-                unsafe_allow_html=True)
+    # ── Derive today's surgery lists from weekly schedule ────────────────────
+    weekday_name = target_date.strftime("%A")
+    day_schedule = WEEKLY_SCHEDULE.get(weekday_name)
 
     if not day_schedule:
-        st.info(f"{weekday_name} is not a scheduled OT day (no standard lists). "
-                "You can still generate a draft with manual room assignments below.")
-        # On weekends just show Trauma + Emergency
-        day_schedule = {"am": [], "pm": []}
+        day_schedule = {"am": [], "pm": [], "obs": False}
 
-    # Combine AM+PM unique types for display, plus fixed extras
-    am_types = day_schedule["am"]
-    pm_types = day_schedule["pm"]
+    am_types  = day_schedule["am"]
+    pm_types  = day_schedule["pm"]
     obs_today = weekday_name in OBS_DAYS
     all_types_today = list(dict.fromkeys(
-        am_types + pm_types + FIXED_EXTRA_SLOTS +
-        (["Obstetric"] if obs_today else [])
+        am_types + pm_types + FIXED_EXTRA_SLOTS + (["Obstetric"] if obs_today else [])
     ))
 
-    # Show the day's schedule as a clean summary card
-    am_only = [t for t in am_types if t not in pm_types]
-    pm_only = [t for t in pm_types if t not in am_types]
-    both    = [t for t in am_types if t in pm_types]
-
-    obs_note = "C7-OBS: Obstetric (whole day)" if obs_today else "C7-OBS: not scheduled today"
-    obs_colour = "#00d4aa" if obs_today else "#8b949e"
-
-    summary_lines = []
-    if both:
-        summary_lines.append(f'<span style="color:#00d4aa;">AM + PM:</span> {", ".join(both)}')
-    if am_only:
-        summary_lines.append(f'<span style="color:#1f8ef1;">AM only:</span> {", ".join(am_only)}')
-    if pm_only:
-        summary_lines.append(f'<span style="color:#f59e0b;">PM only:</span> {", ".join(pm_only)}')
-    summary_lines.append(f'<span style="color:#ef4444;">Always:</span> {", ".join(FIXED_EXTRA_SLOTS)}')
-    summary_lines.append(f'<span style="color:{obs_colour};">OBS:</span> {obs_note}')
-
-    st.markdown(
-        "<div class='card card-accent'><strong>Today's standard lists:</strong><br>"
-        + "<br>".join(summary_lines) + "</div>",
-        unsafe_allow_html=True,
-    )
-
-    # Auto-populate room_stype on first load for this date
+    # Auto-populate room_stype on first load for this date (silently)
     date_key = f"sched_date_{target_date}"
     if date_key not in st.session_state:
         st.session_state.room_stype    = {}
         st.session_state.room_xray     = {}
         st.session_state.manual_assign = {}
         st.session_state.draft         = None
+        st.session_state.reshuffle_seed = 0
         st.session_state[date_key]     = True
-
-        # Distribute AM surgery types across normal rooms in order
         am_queue = list(am_types)
         for room in all_rooms:
             stype_room = special_types.get(room, "normal")
             if room == OBS_ROOM:
-                # Obstetric whole day Mon/Wed/Fri; leave blank other days
                 st.session_state.room_stype[room] = "Obstetric" if obs_today else "— Not scheduled —"
             elif stype_room == "trauma":
                 st.session_state.room_stype[room] = "Trauma"
@@ -708,43 +673,68 @@ def show():
             elif am_queue:
                 st.session_state.room_stype[room] = am_queue.pop(0)
             else:
-                st.session_state.room_stype[room] = surg_types[0] if surg_types else "General Surgery"
+                st.session_state.room_stype[room] = "General Surgery"
 
-    # Editable grid — user can still override any room
-    st.markdown("**Override surgery type or X-ray flag for any room:**")
-    hdr = st.columns([1.2, 1.8, 0.8, 0.9])
-    for lbl, c in zip(["Room", "Surgery / Case Type", "X-ray?", "Room Type"], hdr):
-        c.markdown(f"**{lbl}**")
+    # ── Step 1: Surgery list summary ──────────────────────────────────────────
+    st.markdown("<div class='section-header'>Step 1 — Today's Surgery Lists</div>",
+                unsafe_allow_html=True)
 
-    all_stype_opts = list(dict.fromkeys(all_types_today + surg_types))  # today's first, then rest
+    if not (am_types or pm_types):
+        st.info(f"{weekday_name} is a weekend — no standard elective lists. "
+                "Trauma and Emergency slots are always available.")
 
-    for room in all_rooms:
-        stype_room = special_types.get(room, "normal")
-        label, colour = SPECIAL_TYPE_LABELS.get(stype_room, SPECIAL_TYPE_LABELS["normal"])
-        cols = st.columns([1.2, 1.8, 0.8, 0.9])
-        cols[0].markdown(f"`{room}`")
-        cur = st.session_state.room_stype.get(room, all_stype_opts[0] if all_stype_opts else "General Surgery")
-        idx = all_stype_opts.index(cur) if cur in all_stype_opts else 0
-        sv  = cols[1].selectbox("", all_stype_opts, index=idx,
-                                key=f"stype_{room}", label_visibility="collapsed")
-        xv  = cols[2].checkbox("", value=st.session_state.room_xray.get(room, False),
-                               key=f"xray_{room}", label_visibility="collapsed")
-        cols[3].markdown(
-            f'<span style="color:{colour};font-weight:600;font-size:.85rem;">{label}</span>',
-            unsafe_allow_html=True)
-        st.session_state.room_stype[room] = sv
-        st.session_state.room_xray[room]  = xv
+    # Two-column AM / PM display
+    col_am, col_pm = st.columns(2)
+
+    with col_am:
+        st.markdown("**🌅 AM Lists**")
+        am_display = am_types + (["Obstetric"] if obs_today else []) + FIXED_EXTRA_SLOTS
+        for i, t in enumerate(am_display):
+            colour = "#ef4444" if t in FIXED_EXTRA_SLOTS else                      "#00d4aa" if t == "Obstetric" else "#e6edf3"
+            st.markdown(
+                f'<div style="padding:6px 10px;margin:3px 0;background:#1c2230;'
+                f'border-left:3px solid {colour};border-radius:4px;font-size:.9rem;">'
+                f'{i+1}. {t}</div>',
+                unsafe_allow_html=True,
+            )
+
+    with col_pm:
+        st.markdown("**🌆 PM Lists**")
+        pm_display = pm_types + (["Obstetric"] if obs_today else []) + FIXED_EXTRA_SLOTS
+        for i, t in enumerate(pm_display):
+            colour = "#ef4444" if t in FIXED_EXTRA_SLOTS else                      "#00d4aa" if t == "Obstetric" else "#e6edf3"
+            st.markdown(
+                f'<div style="padding:6px 10px;margin:3px 0;background:#1c2230;'
+                f'border-left:3px solid {colour};border-radius:4px;font-size:.9rem;">'
+                f'{i+1}. {t}</div>',
+                unsafe_allow_html=True,
+            )
+
+    # Show if AM and PM differ
+    am_only = [t for t in am_types if t not in pm_types]
+    pm_only = [t for t in pm_types if t not in am_types]
+    if am_only or pm_only:
+        notes = []
+        if am_only:
+            notes.append(f"AM only: <b>{', '.join(am_only)}</b>")
+        if pm_only:
+            notes.append(f"PM only: <b>{', '.join(pm_only)}</b>")
+        st.caption(" · ".join(notes))
+
+    if not obs_today:
+        st.caption("⬜ C7-OBS not scheduled today (runs Mon / Wed / Fri)")
 
     st.divider()
 
     # ── Generate / Reshuffle / Clear ──────────────────────────────────────────
     col_gen, col_reshuffle, col_clear = st.columns([2, 1.2, 0.8])
-    generate_clicked  = col_gen.button("⚡ Generate Suggested Draft", type="primary", use_container_width=True)
+    generate_clicked  = col_gen.button("⚡ Generate Suggested Draft",
+                                       type="primary", use_container_width=True)
     reshuffle_clicked = col_reshuffle.button("🔀 Reshuffle", use_container_width=True,
                                               help="Re-run with a different colleague combination")
     if col_clear.button("🗑 Clear", use_container_width=True):
-        st.session_state.draft         = None
-        st.session_state.manual_assign = {}
+        st.session_state.draft          = None
+        st.session_state.manual_assign  = {}
         st.session_state.reshuffle_seed = 0
         st.rerun()
 
