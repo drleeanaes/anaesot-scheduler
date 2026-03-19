@@ -778,91 +778,174 @@ def show():
         </div>
         """, unsafe_allow_html=True)
 
-        # Filtered pools for dropdowns
-        # AM pool: include pm_paac colleagues if they are AM available
-        # PM pool: exclude pm_paac colleagues (their PM is blocked)
-        am_opts_pool = [cd for cd in all_day
-                        if cd.am_avail and not cd.am_call]
-        pm_opts_pool = [cd for cd in all_day
-                        if cd.pm_avail and not cd.am_call and not cd.pm_paac]
+        # ── Staff pools ───────────────────────────────────────────────────────
+        am_opts_pool = [cd for cd in all_day if cd.am_avail and not cd.am_call]
+        pm_opts_pool = [cd for cd in all_day if cd.pm_avail and not cd.am_call and not cd.pm_paac]
         am_opts = ["— Unassigned —"] + [cd.staff.name for cd in am_opts_pool]
         pm_opts = ["— Unassigned —"] + [cd.staff.name for cd in pm_opts_pool]
+        all_room_opts = ["— None —"] + all_rooms
 
-        # Header
-        hdr3 = st.columns([0.8, 0.8, 0.5, 1.4, 1.4, 1.4, 1.4, 1.0])
-        for lbl, c in zip(["Room","Type","X-ray","AM Lead","AM Asst","PM Lead","PM Asst","Status"], hdr3):
-            c.markdown(f"**{lbl}**")
-        st.divider()
+        # ── Build surgery-type-centric view ───────────────────────────────────
+        # Group rooms by their assigned surgery type from session state
+        # Each surgery type gets its own card showing: staff, room assignment, X-ray toggle
 
-        for room in all_rooms:
-            ma      = st.session_state.manual_assign.get(room,
-                        {"am_lead":"— Unassigned —","am_asst":"— Unassigned —",
-                         "pm_lead":"— Unassigned —","pm_asst":"— Unassigned —","_note":""})
-            stype_v = st.session_state.room_stype.get(room, "—")
-            is_xray = st.session_state.room_xray.get(room, False)
-            stype_room = special_types.get(room, "normal")
-            badge_lbl, badge_colour = SPECIAL_TYPE_LABELS.get(stype_room, SPECIAL_TYPE_LABELS["normal"])
+        # Collect the full list of surgery types for today (AM + PM + fixed)
+        # Use the draft's room_stype assignments as the source of truth
+        # Build: stype → list of rooms assigned to it
+        stype_to_rooms = {}
+        for room, stype in st.session_state.room_stype.items():
+            if stype and stype not in ("— Not scheduled —",):
+                stype_to_rooms.setdefault(stype, []).append(room)
 
-            c = st.columns([0.8, 0.8, 0.5, 1.4, 1.4, 1.4, 1.4, 1.0])
-            c[0].markdown(f"`{room}`")
-            c[1].markdown(f'<span style="color:{badge_colour};font-weight:600;font-size:.82rem;">{badge_lbl}</span>',
-                          unsafe_allow_html=True)
-            c[2].markdown("☢" if is_xray else "—")
+        # Build ordered list: AM types first, PM types, then fixed
+        ordered_stypes = list(dict.fromkeys(
+            am_types + pm_types + FIXED_EXTRA_SLOTS +
+            (["Obstetric"] if obs_today else [])
+        ))
+        # Add any types in room assignments not already in the list
+        for st_type in stype_to_rooms:
+            if st_type not in ordered_stypes:
+                ordered_stypes.append(st_type)
 
-            if stype_room == "eot":
-                # EOT — all 4 slots manual, show note
-                for i, slot in enumerate(["am_lead","am_asst","pm_lead","pm_asst"]):
-                    opts = am_opts if "am" in slot else pm_opts
-                    cur  = ma.get(slot, "— Unassigned —")
-                    idx  = opts.index(cur) if cur in opts else 0
-                    val  = c[3+i].selectbox("", opts, index=idx, key=f"{slot}_{room}",
-                                            label_visibility="collapsed")
-                    ma[slot] = val
-                c[7].markdown('<span class="badge-danger">🔴 Manual</span>', unsafe_allow_html=True)
-            elif stype_room == "trauma":
-                # AM lead only, PM lead only, no assistants
-                for i, (slot, opts) in enumerate([("am_lead", am_opts), ("pm_lead", pm_opts)]):
-                    cur = ma.get(slot, "— Unassigned —")
-                    idx = opts.index(cur) if cur in opts else 0
-                    val = c[3 + i*2].selectbox("", opts, index=idx, key=f"{slot}_{room}",
-                                               label_visibility="collapsed")
-                    ma[slot] = val
-                c[4].markdown('<small style="color:#8b949e;">solo</small>', unsafe_allow_html=True)
-                c[6].markdown('<small style="color:#8b949e;">solo</small>', unsafe_allow_html=True)
-                ma["am_asst"] = "— Unassigned —"
-                ma["pm_asst"] = "— Unassigned —"
-                c[7].markdown('<span class="badge-warn">🟡 Trauma</span>', unsafe_allow_html=True)
-            else:
-                # Normal room — all 4 dropdowns
-                for i, (slot, opts) in enumerate([
-                    ("am_lead", am_opts), ("am_asst", am_opts),
-                    ("pm_lead", pm_opts), ("pm_asst", pm_opts),
-                ]):
-                    cur = ma.get(slot, "— Unassigned —")
-                    idx = opts.index(cur) if cur in opts else 0
-                    val = c[3+i].selectbox("", opts, index=idx, key=f"{slot}_{room}",
-                                           label_visibility="collapsed")
-                    ma[slot] = val
+        # ── Render one card per surgery type ──────────────────────────────────
+        for stype in ordered_stypes:
+            # Determine AM/PM availability for this type
+            in_am = stype in am_types or stype in ("Trauma","Emergency","Obstetric")
+            in_pm = stype in pm_types or stype in ("Trauma","Emergency","Obstetric")
+            session_tag = ""
+            if in_am and in_pm:   session_tag = "AM + PM"
+            elif in_am:           session_tag = "AM only"
+            elif in_pm:           session_tag = "PM only"
 
-                # Status badge
-                row_viol = _check_constraints(
-                    {room: ma}, all_day, st.session_state.room_xray,
-                    coordinator_name or "", special_types
+            # Colour coding
+            type_colour = {
+                "Trauma":       "#f59e0b",
+                "Emergency":    "#ef4444",
+                "Obstetric":    "#00d4aa",
+                "Neurosurgery": "#1f8ef1",
+            }.get(stype, "#e6edf3")
+
+            # Rooms currently assigned to this type
+            assigned_rooms = stype_to_rooms.get(stype, [])
+
+            st.markdown(
+                f'<div class="card card-accent" style="border-left-color:{type_colour};">'                f'<strong style="color:{type_colour};font-size:1rem;">{stype}</strong>'                f' &nbsp;<small style="color:#8b949e;">{session_tag}</small></div>',
+                unsafe_allow_html=True,
+            )
+
+            # ── X-ray toggle for this surgery type ────────────────────────────
+            xray_key = f"xray_stype_{stype}"
+            if xray_key not in st.session_state:
+                # Default: Orthopaedic is usually X-ray
+                st.session_state[xray_key] = stype in ("Orthopaedic",)
+            col_xray, col_room_assign = st.columns([1, 3])
+            xray_val = col_xray.checkbox(
+                "☢ X-ray list", value=st.session_state[xray_key], key=f"xray_cb_{stype}"
+            )
+            st.session_state[xray_key] = xray_val
+            # Propagate X-ray flag to all rooms of this type
+            for room in assigned_rooms:
+                st.session_state.room_xray[room] = xray_val
+
+            # ── Room assignment for this surgery type ─────────────────────────
+            with col_room_assign:
+                cur_rooms_display = ", ".join(assigned_rooms) if assigned_rooms else "— None assigned —"
+                st.caption(f"Currently assigned rooms: **{cur_rooms_display}**")
+
+                # Multi-select to assign rooms to this surgery type
+                new_rooms = st.multiselect(
+                    "Assign rooms to this list",
+                    options=all_rooms,
+                    default=assigned_rooms,
+                    key=f"rooms_for_{stype}",
                 )
-                lead_cd = _cd_by_name(am_opts_pool, ma.get("am_lead",""))
-                pref_ok = False
-                if lead_cd:
-                    keywords = specialty_prefs.get(stype_v, [stype_v.lower()])
-                    pref_ok  = any(k in lead_cd.staff.specialties for k in keywords)
-                if row_viol:
-                    c[7].markdown('<span class="badge-danger">✗</span>', unsafe_allow_html=True)
-                    for v in row_viol: st.caption(f"  ↳ {v}")
-                elif pref_ok:
-                    c[7].markdown('<span class="badge-ok">✓ match</span>', unsafe_allow_html=True)
-                else:
-                    c[7].markdown('<span class="badge-warn">⚑</span>', unsafe_allow_html=True)
+                # Update room_stype for selected/deselected rooms
+                for room in new_rooms:
+                    st.session_state.room_stype[room] = stype
+                    st.session_state.room_xray[room]  = xray_val
+                # Unassign rooms removed from this type (only if they still point here)
+                for room in assigned_rooms:
+                    if room not in new_rooms:
+                        # Only clear if still pointing to this type
+                        if st.session_state.room_stype.get(room) == stype:
+                            st.session_state.room_stype[room] = "— Unassigned —"
 
-            st.session_state.manual_assign[room] = ma
+            # ── Staff assignment per room for this surgery type ───────────────
+            current_rooms = [r for r in all_rooms
+                             if st.session_state.room_stype.get(r) == stype]
+
+            if not current_rooms:
+                st.caption("  No rooms assigned yet.")
+            else:
+                # Table header
+                h = st.columns([1.0, 1.4, 1.4, 1.4, 1.4, 0.9])
+                for lbl, col in zip(["Room","AM Lead","AM Asst","PM Lead","PM Asst","Status"], h):
+                    col.markdown(f"<small><b>{lbl}</b></small>", unsafe_allow_html=True)
+
+                for room in current_rooms:
+                    ma = st.session_state.manual_assign.get(room, {
+                        "am_lead":"— Unassigned —","am_asst":"— Unassigned —",
+                        "pm_lead":"— Unassigned —","pm_asst":"— Unassigned —","_note":"",
+                    })
+                    stype_room = special_types.get(room, "normal")
+                    row = st.columns([1.0, 1.4, 1.4, 1.4, 1.4, 0.9])
+                    row[0].markdown(f"`{room}`")
+
+                    if stype_room == "eot":
+                        for i, (slot, opts) in enumerate([
+                            ("am_lead",am_opts),("am_asst",am_opts),
+                            ("pm_lead",pm_opts),("pm_asst",pm_opts),
+                        ]):
+                            cur = ma.get(slot,"— Unassigned —")
+                            idx = opts.index(cur) if cur in opts else 0
+                            ma[slot] = row[1+i].selectbox("",opts,index=idx,
+                                key=f"{slot}_{room}",label_visibility="collapsed")
+                        row[5].markdown('<span class="badge-danger">🔴</span>',unsafe_allow_html=True)
+
+                    elif stype_room == "trauma":
+                        for i, (slot, opts) in enumerate([("am_lead",am_opts),("pm_lead",pm_opts)]):
+                            cur = ma.get(slot,"— Unassigned —")
+                            idx = opts.index(cur) if cur in opts else 0
+                            ma[slot] = row[1+i*2].selectbox("",opts,index=idx,
+                                key=f"{slot}_{room}",label_visibility="collapsed")
+                        row[2].markdown('<small style="color:#8b949e;">solo</small>',unsafe_allow_html=True)
+                        row[4].markdown('<small style="color:#8b949e;">solo</small>',unsafe_allow_html=True)
+                        ma["am_asst"] = "— Unassigned —"
+                        ma["pm_asst"] = "— Unassigned —"
+                        row[5].markdown('<span class="badge-warn">🟡</span>',unsafe_allow_html=True)
+
+                    else:
+                        for i, (slot, opts) in enumerate([
+                            ("am_lead",am_opts),("am_asst",am_opts),
+                            ("pm_lead",pm_opts),("pm_asst",pm_opts),
+                        ]):
+                            cur = ma.get(slot,"— Unassigned —")
+                            idx = opts.index(cur) if cur in opts else 0
+                            ma[slot] = row[1+i].selectbox("",opts,index=idx,
+                                key=f"{slot}_{room}",label_visibility="collapsed")
+
+                        row_viol = _check_constraints(
+                            {room: ma}, all_day, st.session_state.room_xray,
+                            coordinator_name or "", special_types
+                        )
+                        if row_viol:
+                            row[5].markdown('<span class="badge-danger">✗</span>',unsafe_allow_html=True)
+                            for v in row_viol: st.caption(f"  ↳ {v}")
+                        else:
+                            lead_cd = _cd_by_name(am_opts_pool, ma.get("am_lead",""))
+                            pref_ok = lead_cd and any(
+                                k in lead_cd.staff.specialties
+                                for k in specialty_prefs.get(stype, [stype.lower()])
+                            )
+                            row[5].markdown(
+                                '<span class="badge-ok">✓</span>' if pref_ok
+                                else '<span class="badge-warn">⚑</span>',
+                                unsafe_allow_html=True,
+                            )
+
+                    st.session_state.manual_assign[room] = ma
+
+            st.markdown("---")
 
         st.divider()
 
