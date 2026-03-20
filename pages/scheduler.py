@@ -303,11 +303,14 @@ def _check_constraints(manual_assign, all_day, room_xray, coordinator_name, spec
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _generate_draft(all_day, rooms, coordinator_name, specialty_prefs, consult_criteria,
-                    seed=0, target_date=None):
+                    seed=0, target_date=None, xray_types=None):
     """
     Build draft assignments respecting AM/PM availability and per-day surgery types.
+    xray_types: dict {surgery_type: bool} — pregnant staff excluded from True entries.
     Returns manual_assign dict and consult name.
     """
+    if xray_types is None:
+        xray_types = {}
     special_types = get_room_special_types()
 
     # Pools — exclude coordinator and am_call (emergency team)
@@ -409,9 +412,8 @@ def _generate_draft(all_day, rooms, coordinator_name, specialty_prefs, consult_c
             "am_lead": am_lead, "am_asst": am_asst,
             "pm_lead": pm_lead, "pm_asst": pm_asst,
             "_note": "☢ X-ray list" if room_is_xray else "",
+            "_xray": room_is_xray,   # carried back to caller to update session state
         }
-        # Propagate X-ray flag so Step 2 reflects it immediately
-        st.session_state.room_xray[room] = room_is_xray
 
     # ── Second pass: fill PM assistants with surplus trainees ────────────────
     # Only assign a replacement PM assistant if there are spare Senior Trainee/Trainee
@@ -808,6 +810,10 @@ def show():
                 target_date=target_date,
                 xray_types=xray_types_now,
             )
+        # Apply X-ray flags back to session state from draft result
+        for room, a in ma.items():
+            if a.get("_xray") is not None:
+                st.session_state.room_xray[room] = a["_xray"]
         st.session_state.manual_assign    = ma
         st.session_state["consult_manual"] = consult_name
         st.session_state.draft            = True
@@ -824,6 +830,9 @@ def show():
                 target_date=target_date,
                 xray_types=xray_types_now,
             )
+        for room, a in ma.items():
+            if a.get("_xray") is not None:
+                st.session_state.room_xray[room] = a["_xray"]
         st.session_state.manual_assign    = ma
         st.session_state["consult_manual"] = consult_name
         st.success(f"✓ Reshuffled — combination #{seed}.")
