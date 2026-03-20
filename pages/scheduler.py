@@ -132,7 +132,7 @@ WEEKLY_SCHEDULE = {
         "am": [
             "Orthopaedic",      # C11-OT1 (TJR)
             "Orthopaedic",      # C11-OT2
-            "Orthopaedic",      # C10-OT2 (am only)
+            "Orthopaedic",      # C10-OT2 (whole day)
             "Gynaecology",      # C11-OT3
             "General Surgery",  # C10-OT1
             "Urology",          # C10-OT3
@@ -142,7 +142,7 @@ WEEKLY_SCHEDULE = {
         "pm": [
             "Orthopaedic",      # C11-OT1
             "Orthopaedic",      # C11-OT2
-            # C10-OT2 pm = GEN LA → skip
+            "Orthopaedic",      # C10-OT2 (whole day — corrected)
             "Gynaecology",
             "General Surgery",
             "Urology",
