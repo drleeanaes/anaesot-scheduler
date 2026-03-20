@@ -24,40 +24,131 @@ from pages.rooms import get_room_special_types, SPECIAL_TYPE_LABELS
 # C7-OBS is always Obstetric AM only on weekdays
 # ─────────────────────────────────────────────────────────────────────────────
 WEEKLY_SCHEDULE = {
-    # Each day: "am" and "pm" list surgery types for elective rooms
-    # Trauma and Emergency are always added as extra slots (fixed)
-    # Obstetric (C7-OBS) runs whole day Mon / Wed / Fri only
+    # Each day: "am" and "pm" are ORDERED lists with one entry per room/list.
+    # Repeated entries = multiple rooms running that surgery type.
+    # Trauma and Emergency are always appended as fixed extra slots.
+    # Obstetric (C7-OBS) runs whole day Mon / Wed / Fri only.
     "Monday": {
-        "am": ["Orthopaedic", "Gynaecology", "ENT", "Ophthalmology",
-               "Upper GI", "Vascular", "General Surgery"],
-        "pm": ["Orthopaedic", "Gynaecology", "ENT", "Ophthalmology",
-               "Upper GI", "Vascular", "General Surgery"],
+        "am": [
+            "Orthopaedic",      # C11-OT1 (TJR)
+            "Gynaecology",      # C11-OT2
+            "Gynaecology",      # C11-OT3
+            "ENT",              # C10-OT1
+            "ENT",              # C10-OT2
+            "Ophthalmology",    # C8-OT2
+            "Upper GI",         # C8-OT3
+            "Vascular",         # C6-OT1
+            "General Surgery",  # C6-OT2
+        ],
+        "pm": [
+            "Orthopaedic",
+            "Gynaecology",
+            "Gynaecology",
+            "ENT",
+            "ENT",
+            "Ophthalmology",
+            "Upper GI",
+            "Vascular",
+            "General Surgery",
+        ],
         "obs": True,
     },
     "Tuesday": {
-        "am": ["Neurosurgery", "Orthopaedic", "General Surgery", "Upper GI",
-               "Colorectal", "Ophthalmology", "Vascular"],
-        "pm": ["Neurosurgery", "Orthopaedic", "General Surgery", "Colorectal",
-               "Hepatobiliary", "Ophthalmology", "Vascular"],
+        "am": [
+            "Neurosurgery",     # C11-OT1
+            "Orthopaedic",      # C11-OT2
+            "Orthopaedic",      # C11-OT3
+            "General Surgery",  # C10-OT2 (mixed teams)
+            "General Surgery",  # C10-OT3 (purple)
+            "Upper GI",         # C10-OT2 sub-list
+            "Colorectal",       # C8-OT3
+            "Ophthalmology",    # C8-OT2
+            "Vascular",         # C6-OT2
+        ],
+        "pm": [
+            "Neurosurgery",
+            "Orthopaedic",
+            "Orthopaedic",
+            "General Surgery",
+            "General Surgery",
+            "Hepatobiliary",    # C10-OT2 switches from Upper GI to Hepatobiliary PM
+            "Colorectal",
+            "Ophthalmology",
+            "Vascular",
+        ],
         "obs": False,
     },
     "Wednesday": {
-        "am": ["Orthopaedic", "Gynaecology", "Urology", "Ophthalmology",
-               "General Surgery", "OMFS", "Hepatobiliary"],
-        "pm": ["Orthopaedic", "Gynaecology", "Urology", "Ophthalmology",
-               "Hepatobiliary", "OMFS"],
+        "am": [
+            "Orthopaedic",      # C11-OT1 (TJR)
+            "Orthopaedic",      # C11-OT2
+            "Orthopaedic",      # C10-OT2
+            "Gynaecology",      # C11-OT3
+            "Urology",          # C10-OT1
+            "Urology",          # C10-OT3
+            "Ophthalmology",    # C8-OT2
+            "Ophthalmology",    # C8-OT3 (am)
+            "General Surgery",  # C8-OT1 (am trauma list)
+            "OMFS",             # C6-OT2
+            "Hepatobiliary",    # listed AM
+        ],
+        "pm": [
+            "Orthopaedic",
+            "Orthopaedic",
+            "Orthopaedic",
+            "Gynaecology",
+            "Urology",
+            "Urology",
+            "Ophthalmology",    # C8-OT2
+            "Hepatobiliary",    # C8-OT3 switches to Hepatobiliary PM
+            "OMFS",
+        ],
         "obs": True,
     },
     "Thursday": {
-        "am": ["Neurosurgery", "Orthopaedic", "ENT", "Colorectal",
-               "Hepatobiliary", "General Surgery"],
-        "pm": ["Neurosurgery", "Orthopaedic", "ENT", "Colorectal",
-               "Hepatobiliary", "General Surgery"],
+        "am": [
+            "Neurosurgery",     # C11-OT1
+            "Orthopaedic",      # C11-OT2
+            "Orthopaedic",      # C11-OT3
+            "ENT",              # C10-OT1
+            "ENT",              # C10-OT2
+            "Colorectal",       # C10-OT3
+            "Hepatobiliary",    # C8-OT3
+            "General Surgery",  # C6-OT2
+        ],
+        "pm": [
+            "Neurosurgery",
+            "Orthopaedic",
+            "Orthopaedic",
+            "ENT",
+            "ENT",
+            "Colorectal",
+            "Hepatobiliary",
+            "General Surgery",
+        ],
         "obs": False,
     },
     "Friday": {
-        "am": ["Orthopaedic", "Gynaecology", "General Surgery", "Urology", "Ophthalmology"],
-        "pm": ["Orthopaedic", "Gynaecology", "General Surgery", "Urology", "Ophthalmology"],
+        "am": [
+            "Orthopaedic",      # C11-OT1 (TJR)
+            "Orthopaedic",      # C11-OT2
+            "Orthopaedic",      # C10-OT2 (am only)
+            "Gynaecology",      # C11-OT3
+            "General Surgery",  # C10-OT1
+            "Urology",          # C10-OT3
+            "Urology",          # C8-OT3
+            "Ophthalmology",    # C8-OT2
+        ],
+        "pm": [
+            "Orthopaedic",      # C11-OT1
+            "Orthopaedic",      # C11-OT2
+            # C10-OT2 pm = GEN LA → skip
+            "Gynaecology",
+            "General Surgery",
+            "Urology",
+            "Urology",
+            "Ophthalmology",
+        ],
         "obs": True,
     },
 }
@@ -705,77 +796,101 @@ def show():
             f"and will be excluded from X-ray lists: **{', '.join(xray_list_names)}**"
         )
 
-    # ── Two-column display with X-ray checkboxes ──────────────────────────────
+    # ── Build counts: how many rooms per type, AM and PM ─────────────────────
+    from collections import Counter
+    am_counts  = Counter(am_types)
+    pm_counts  = Counter(pm_types)
+    # Add fixed extras (1 each)
+    for t in FIXED_EXTRA_SLOTS:
+        am_counts[t] = am_counts.get(t, 1)
+        pm_counts[t] = pm_counts.get(t, 1)
+    # Add OBS if today
+    if obs_today:
+        am_counts["Obstetric"] = 1
+        pm_counts["Obstetric"] = 1
+
+    # Unique types in display order
     all_unique_types = list(dict.fromkeys(
-        am_types + pm_types + FIXED_EXTRA_SLOTS + (["Obstetric"] if obs_today else [])
+        list(am_counts.keys()) + list(pm_counts.keys())
     ))
 
     st.markdown("""
     <div class="card card-accent">
-    <small>Tick <b>☢ X-ray</b> next to any list that uses fluoroscopy / image intensifier.
-    Pregnant colleagues will automatically be excluded from those lists when generating the draft.</small>
+    <small>Each row shows how many rooms run that list today.
+    Tick <b>☢ X-ray</b> for lists that use fluoroscopy — pregnant colleagues
+    will be excluded from those lists automatically.</small>
     </div>
     """, unsafe_allow_html=True)
 
-    # Header row
-    h = st.columns([0.25, 2.5, 0.8, 0.8])
-    h[0].markdown("<small></small>", unsafe_allow_html=True)
+    # Header
+    h = st.columns([0.25, 2.2, 0.65, 0.65, 0.9])
     h[1].markdown("<small><b>Surgery List</b></small>", unsafe_allow_html=True)
-    h[2].markdown("<small><b>Session</b></small>", unsafe_allow_html=True)
-    h[3].markdown("<small><b>☢ X-ray?</b></small>", unsafe_allow_html=True)
+    h[2].markdown("<small><b>AM rooms</b></small>", unsafe_allow_html=True)
+    h[3].markdown("<small><b>PM rooms</b></small>", unsafe_allow_html=True)
+    h[4].markdown("<small><b>☢ X-ray?</b></small>", unsafe_allow_html=True)
 
     for t in all_unique_types:
-        in_am = t in am_types or t in FIXED_EXTRA_SLOTS or (t == "Obstetric" and obs_today)
-        in_pm = t in pm_types or t in FIXED_EXTRA_SLOTS or (t == "Obstetric" and obs_today)
-        session_label = "AM + PM" if (in_am and in_pm) else ("AM only" if in_am else "PM only")
-        session_colour = "#00d4aa" if (in_am and in_pm) else "#1f8ef1" if in_am else "#f59e0b"
+        am_n = am_counts.get(t, 0)
+        pm_n = pm_counts.get(t, 0)
 
         type_colour = (
             "#ef4444" if t in FIXED_EXTRA_SLOTS else
             "#00d4aa" if t == "Obstetric" else
             "#e6edf3"
         )
+        am_colour = "#1f8ef1" if am_n > 0 else "#30363d"
+        pm_colour = "#f59e0b" if pm_n > 0 else "#30363d"
 
-        row = st.columns([0.25, 2.5, 0.8, 0.8])
-        # Colour dot
+        row = st.columns([0.25, 2.2, 0.65, 0.65, 0.9])
         row[0].markdown(
             f'<div style="width:10px;height:10px;border-radius:50%;'
             f'background:{type_colour};margin-top:10px;"></div>',
             unsafe_allow_html=True,
         )
-        # Surgery type name
         row[1].markdown(
-            f'<div style="padding:6px 0;font-size:.95rem;">{t}</div>',
+            f'<div style="padding:5px 0;font-size:.95rem;font-weight:{"600" if am_n > 1 or pm_n > 1 else "400"};">{t}</div>',
             unsafe_allow_html=True,
         )
-        # Session badge
+        # AM count badge
+        am_label = f"{am_n}×" if am_n > 0 else "—"
         row[2].markdown(
-            f'<small style="color:{session_colour};">{session_label}</small>',
+            f'<div style="padding:5px 0;color:{am_colour};font-weight:600;font-size:.9rem;">{am_label}</div>',
+            unsafe_allow_html=True,
+        )
+        # PM count badge
+        pm_label = f"{pm_n}×" if pm_n > 0 else "—"
+        row[3].markdown(
+            f'<div style="padding:5px 0;color:{pm_colour};font-weight:600;font-size:.9rem;">{pm_label}</div>',
             unsafe_allow_html=True,
         )
         # X-ray checkbox
         current_xray = xray_types.get(t, False)
-        new_xray = row[3].checkbox(
+        new_xray = row[4].checkbox(
             "", value=current_xray, key=f"xray_type_{t}_{target_date}",
             label_visibility="collapsed"
         )
         xray_types[t] = new_xray
-        # Update room_xray for any rooms already assigned to this type
         for room in all_rooms:
             if st.session_state.room_stype.get(room) == t:
                 st.session_state.room_xray[room] = new_xray
 
     st.session_state[xray_state_key] = xray_types
 
-    # Show diff note if AM ≠ PM
-    am_only_diff = [t for t in am_types if t not in pm_types]
-    pm_only_diff = [t for t in pm_types if t not in am_types]
-    if am_only_diff or pm_only_diff:
-        notes = []
-        if am_only_diff:
-            notes.append(f"AM only: <b>{', '.join(am_only_diff)}</b>")
-        if pm_only_diff:
-            notes.append(f"PM only: <b>{', '.join(pm_only_diff)}</b>")
+    # Note where AM and PM differ
+    am_only_diff = [t for t in am_counts if t not in pm_counts and t not in FIXED_EXTRA_SLOTS]
+    pm_only_diff = [t for t in pm_counts if t not in am_counts and t not in FIXED_EXTRA_SLOTS]
+    changed      = [t for t in am_counts if t in pm_counts
+                    and am_counts[t] != pm_counts[t]
+                    and t not in FIXED_EXTRA_SLOTS]
+    notes = []
+    if am_only_diff:
+        notes.append(f"AM only: <b>{', '.join(am_only_diff)}</b>")
+    if pm_only_diff:
+        notes.append(f"PM only: <b>{', '.join(pm_only_diff)}</b>")
+    if changed:
+        for t in changed:
+            notes.append(f"{t}: AM {am_counts[t]}× → PM {pm_counts[t]}×")
+    if notes:
         st.caption(" · ".join(notes))
 
     if not obs_today:
