@@ -456,8 +456,13 @@ def _generate_draft(all_day, rooms, coordinator_name, specialty_prefs, consult_c
         stype_str    = st.session_state.room_stype.get(room, "General Surgery")
         pm_stype_str = stype_str
 
-        # X-ray flag for this room's surgery type — exclude pregnant staff if True
-        room_is_xray = bool(xray_types.get(stype_str, False))
+        # X-ray flag: check if this surgery type has ANY instance marked as X-ray
+        # Keys are type_idx (e.g. "Orthopaedic_1", "Orthopaedic_2")
+        # A room is X-ray if at least one instance of its type is ticked
+        room_is_xray = any(
+            v for k, v in xray_types.items()
+            if k.rsplit("_", 1)[0] == stype_str
+        )
         am_pool_use  = [cd for cd in am_pool if not (room_is_xray and cd.staff.pregnant)]
         pm_pool_use  = [cd for cd in pm_pool if not (room_is_xray and cd.staff.pregnant)]
 
@@ -777,18 +782,16 @@ def show():
     # Initialise on date change (already cleared in date_key block above)
     xray_state_key = f"xray_types_{target_date}"
     if xray_state_key not in st.session_state:
-        # Orthopaedic defaults to X-ray; everything else off
-        all_unique = list(dict.fromkeys(
-            am_types + pm_types + FIXED_EXTRA_SLOTS + (["Obstetric"] if obs_today else [])
-        ))
-        st.session_state[xray_state_key] = {
-            t: (t == "Orthopaedic") for t in all_unique
-        }
+        # Initialise empty — individual rows will seed their own defaults on first render
+        st.session_state[xray_state_key] = {}
     xray_types = st.session_state[xray_state_key]
 
     # ── Pregnant colleagues warning ───────────────────────────────────────────
     pregnant_staff = [cd for cd in all_day if cd.staff.pregnant]
-    xray_list_names = [t for t, v in xray_types.items() if v]
+    # Collect unique type names that have any X-ray instance ticked
+    xray_list_names = list(dict.fromkeys(
+        k.rsplit("_", 1)[0] for k, v in xray_types.items() if v
+    ))
     if pregnant_staff and xray_list_names:
         preg_names = ", ".join(cd.staff.name for cd in pregnant_staff)
         st.warning(
@@ -796,102 +799,110 @@ def show():
             f"and will be excluded from X-ray lists: **{', '.join(xray_list_names)}**"
         )
 
-    # ── Build counts: how many rooms per type, AM and PM ─────────────────────
-    from collections import Counter
-    am_counts  = Counter(am_types)
-    pm_counts  = Counter(pm_types)
-    # Add fixed extras (1 each)
-    for t in FIXED_EXTRA_SLOTS:
-        am_counts[t] = am_counts.get(t, 1)
-        pm_counts[t] = pm_counts.get(t, 1)
-    # Add OBS if today
-    if obs_today:
-        am_counts["Obstetric"] = 1
-        pm_counts["Obstetric"] = 1
+    # ── Build expanded row list: one row per list instance ──────────────────
+    # e.g. 3x Orthopaedic → 3 separate rows, each with its own X-ray toggle
+    # Expand am_types and pm_types (already repeated in WEEKLY_SCHEDULE)
+    # Add fixed extras and OBS as single entries
+    all_am = list(am_types) + (["Obstetric"] if obs_today else []) + FIXED_EXTRA_SLOTS
+    all_pm = list(pm_types) + (["Obstetric"] if obs_today else []) + FIXED_EXTRA_SLOTS
 
-    # Unique types in display order
-    all_unique_types = list(dict.fromkeys(
-        list(am_counts.keys()) + list(pm_counts.keys())
-    ))
+    # Build ordered unique (type, index) rows covering both AM and PM
+    # Each row = one specific list instance identified by (type, occurrence_index)
+    # We pair up AM and PM entries of the same type by position
+    from collections import Counter
+    am_counter = {}   # type → count seen so far
+    pm_counter = {}
+
+    # Full list of row keys: (type, idx) in AM order, then any PM-only extras
+    row_keys = []
+    for t in all_am:
+        am_counter[t] = am_counter.get(t, 0) + 1
+        row_keys.append((t, am_counter[t]))
+
+    # Add PM-only entries not in AM
+    pm_seen = {}
+    for t in all_pm:
+        pm_seen[t] = pm_seen.get(t, 0) + 1
+    for t, cnt in pm_seen.items():
+        am_cnt = am_counter.get(t, 0)
+        for i in range(am_cnt + 1, cnt + 1):
+            row_keys.append((t, i))
 
     st.markdown("""
     <div class="card card-accent">
-    <small>Each row shows how many rooms run that list today.
-    Tick <b>☢ X-ray</b> for lists that use fluoroscopy — pregnant colleagues
-    will be excluded from those lists automatically.</small>
+    <small>Each row is one surgery list running today. Repeated types (e.g. three Orthopaedic lists)
+    appear as separate rows — tick <b>☢ X-ray</b> individually for each one.
+    Pregnant colleagues are excluded from X-ray lists when generating the draft.</small>
     </div>
     """, unsafe_allow_html=True)
 
     # Header
-    h = st.columns([0.25, 2.2, 0.65, 0.65, 0.9])
+    h = st.columns([0.25, 2.5, 0.6, 0.6, 0.9])
     h[1].markdown("<small><b>Surgery List</b></small>", unsafe_allow_html=True)
-    h[2].markdown("<small><b>AM rooms</b></small>", unsafe_allow_html=True)
-    h[3].markdown("<small><b>PM rooms</b></small>", unsafe_allow_html=True)
+    h[2].markdown("<small><b>AM</b></small>", unsafe_allow_html=True)
+    h[3].markdown("<small><b>PM</b></small>", unsafe_allow_html=True)
     h[4].markdown("<small><b>☢ X-ray?</b></small>", unsafe_allow_html=True)
 
-    for t in all_unique_types:
-        am_n = am_counts.get(t, 0)
-        pm_n = pm_counts.get(t, 0)
+    # Track how many of each type we have rendered to compare AM vs PM counts
+    am_totals = {}
+    for t in all_am: am_totals[t] = am_totals.get(t, 0) + 1
+    pm_totals = {}
+    for t in all_pm: pm_totals[t] = pm_totals.get(t, 0) + 1
+
+    for (t, idx) in row_keys:
+        in_am = idx <= am_totals.get(t, 0)
+        in_pm = idx <= pm_totals.get(t, 0)
 
         type_colour = (
             "#ef4444" if t in FIXED_EXTRA_SLOTS else
             "#00d4aa" if t == "Obstetric" else
             "#e6edf3"
         )
-        am_colour = "#1f8ef1" if am_n > 0 else "#30363d"
-        pm_colour = "#f59e0b" if pm_n > 0 else "#30363d"
 
-        row = st.columns([0.25, 2.2, 0.65, 0.65, 0.9])
+        # Unique key per row instance
+        row_key = f"{t}_{idx}"
+
+        row = st.columns([0.25, 2.5, 0.6, 0.6, 0.9])
         row[0].markdown(
             f'<div style="width:10px;height:10px;border-radius:50%;'
             f'background:{type_colour};margin-top:10px;"></div>',
             unsafe_allow_html=True,
         )
         row[1].markdown(
-            f'<div style="padding:5px 0;font-size:.95rem;font-weight:{"600" if am_n > 1 or pm_n > 1 else "400"};">{t}</div>',
+            f'<div style="padding:5px 0;font-size:.95rem;">{t}</div>',
             unsafe_allow_html=True,
         )
-        # AM count badge
-        am_label = f"{am_n}×" if am_n > 0 else "—"
         row[2].markdown(
-            f'<div style="padding:5px 0;color:{am_colour};font-weight:600;font-size:.9rem;">{am_label}</div>',
+            f'<div style="padding:5px 0;color:{"#1f8ef1" if in_am else "#30363d"};font-size:.9rem;">{"✓" if in_am else "—"}</div>',
             unsafe_allow_html=True,
         )
-        # PM count badge
-        pm_label = f"{pm_n}×" if pm_n > 0 else "—"
         row[3].markdown(
-            f'<div style="padding:5px 0;color:{pm_colour};font-weight:600;font-size:.9rem;">{pm_label}</div>',
+            f'<div style="padding:5px 0;color:{"#f59e0b" if in_pm else "#30363d"};font-size:.9rem;">{"✓" if in_pm else "—"}</div>',
             unsafe_allow_html=True,
         )
-        # X-ray checkbox
-        current_xray = xray_types.get(t, False)
+
+        # Individual X-ray checkbox per list instance
+        xray_key_inst = f"{t}_{idx}"
+        if xray_key_inst not in xray_types:
+            xray_types[xray_key_inst] = (t == "Orthopaedic")
         new_xray = row[4].checkbox(
-            "", value=current_xray, key=f"xray_type_{t}_{target_date}",
+            "", value=xray_types[xray_key_inst],
+            key=f"xray_inst_{t}_{idx}_{target_date}",
             label_visibility="collapsed"
         )
-        xray_types[t] = new_xray
-        for room in all_rooms:
-            if st.session_state.room_stype.get(room) == t:
-                st.session_state.room_xray[room] = new_xray
+        xray_types[xray_key_inst] = new_xray
 
     st.session_state[xray_state_key] = xray_types
 
-    # Note where AM and PM differ
-    am_only_diff = [t for t in am_counts if t not in pm_counts and t not in FIXED_EXTRA_SLOTS]
-    pm_only_diff = [t for t in pm_counts if t not in am_counts and t not in FIXED_EXTRA_SLOTS]
-    changed      = [t for t in am_counts if t in pm_counts
-                    and am_counts[t] != pm_counts[t]
-                    and t not in FIXED_EXTRA_SLOTS]
-    notes = []
-    if am_only_diff:
-        notes.append(f"AM only: <b>{', '.join(am_only_diff)}</b>")
-    if pm_only_diff:
-        notes.append(f"PM only: <b>{', '.join(pm_only_diff)}</b>")
-    if changed:
-        for t in changed:
-            notes.append(f"{t}: AM {am_counts[t]}× → PM {pm_counts[t]}×")
-    if notes:
-        st.caption(" · ".join(notes))
+    # Brief note if AM and PM counts differ for any type
+    diff_notes = []
+    for t in set(list(am_totals.keys()) + list(pm_totals.keys())):
+        if t in FIXED_EXTRA_SLOTS: continue
+        a, p = am_totals.get(t, 0), pm_totals.get(t, 0)
+        if a != p:
+            diff_notes.append(f"{t}: AM {a} list{'s' if a>1 else ''} / PM {p} list{'s' if p>1 else ''}")
+    if diff_notes:
+        st.caption("Session differences: " + " · ".join(diff_notes))
 
     if not obs_today:
         st.caption("⬜ C7-OBS not scheduled today (runs Mon / Wed / Fri)")
