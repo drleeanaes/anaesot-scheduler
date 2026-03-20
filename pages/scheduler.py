@@ -408,8 +408,10 @@ def _generate_draft(all_day, rooms, coordinator_name, specialty_prefs, consult_c
         ma[room] = {
             "am_lead": am_lead, "am_asst": am_asst,
             "pm_lead": pm_lead, "pm_asst": pm_asst,
-            "_note": "",
+            "_note": "☢ X-ray list" if room_is_xray else "",
         }
+        # Propagate X-ray flag so Step 2 reflects it immediately
+        st.session_state.room_xray[room] = room_is_xray
 
     # ── Second pass: fill PM assistants with surplus trainees ────────────────
     # Only assign a replacement PM assistant if there are spare Senior Trainee/Trainee
@@ -683,42 +685,100 @@ def show():
         st.info(f"{weekday_name} is a weekend — no standard elective lists. "
                 "Trauma and Emergency slots are always available.")
 
-    # Two-column AM / PM display
-    col_am, col_pm = st.columns(2)
+    # ── X-ray state: one toggle per unique surgery type ───────────────────────
+    # Initialise on date change (already cleared in date_key block above)
+    xray_state_key = f"xray_types_{target_date}"
+    if xray_state_key not in st.session_state:
+        # Orthopaedic defaults to X-ray; everything else off
+        all_unique = list(dict.fromkeys(
+            am_types + pm_types + FIXED_EXTRA_SLOTS + (["Obstetric"] if obs_today else [])
+        ))
+        st.session_state[xray_state_key] = {
+            t: (t == "Orthopaedic") for t in all_unique
+        }
+    xray_types = st.session_state[xray_state_key]
 
-    with col_am:
-        st.markdown("**🌅 AM Lists**")
-        am_display = am_types + (["Obstetric"] if obs_today else []) + FIXED_EXTRA_SLOTS
-        for i, t in enumerate(am_display):
-            colour = "#ef4444" if t in FIXED_EXTRA_SLOTS else                      "#00d4aa" if t == "Obstetric" else "#e6edf3"
-            st.markdown(
-                f'<div style="padding:6px 10px;margin:3px 0;background:#1c2230;'
-                f'border-left:3px solid {colour};border-radius:4px;font-size:.9rem;">'
-                f'{i+1}. {t}</div>',
-                unsafe_allow_html=True,
-            )
+    # ── Pregnant colleagues warning ───────────────────────────────────────────
+    pregnant_staff = [cd for cd in all_day if cd.staff.pregnant]
+    xray_list_names = [t for t, v in xray_types.items() if v]
+    if pregnant_staff and xray_list_names:
+        preg_names = ", ".join(cd.staff.name for cd in pregnant_staff)
+        st.warning(
+            f"⚠ **{preg_names}** {'is' if len(pregnant_staff)==1 else 'are'} pregnant "
+            f"and will be excluded from X-ray lists: **{', '.join(xray_list_names)}**"
+        )
 
-    with col_pm:
-        st.markdown("**🌆 PM Lists**")
-        pm_display = pm_types + (["Obstetric"] if obs_today else []) + FIXED_EXTRA_SLOTS
-        for i, t in enumerate(pm_display):
-            colour = "#ef4444" if t in FIXED_EXTRA_SLOTS else                      "#00d4aa" if t == "Obstetric" else "#e6edf3"
-            st.markdown(
-                f'<div style="padding:6px 10px;margin:3px 0;background:#1c2230;'
-                f'border-left:3px solid {colour};border-radius:4px;font-size:.9rem;">'
-                f'{i+1}. {t}</div>',
-                unsafe_allow_html=True,
-            )
+    # ── Two-column display with X-ray checkboxes ──────────────────────────────
+    all_unique_types = list(dict.fromkeys(
+        am_types + pm_types + FIXED_EXTRA_SLOTS + (["Obstetric"] if obs_today else [])
+    ))
 
-    # Show if AM and PM differ
-    am_only = [t for t in am_types if t not in pm_types]
-    pm_only = [t for t in pm_types if t not in am_types]
-    if am_only or pm_only:
+    st.markdown("""
+    <div class="card card-accent">
+    <small>Tick <b>☢ X-ray</b> next to any list that uses fluoroscopy / image intensifier.
+    Pregnant colleagues will automatically be excluded from those lists when generating the draft.</small>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Header row
+    h = st.columns([0.25, 2.5, 0.8, 0.8])
+    h[0].markdown("<small></small>", unsafe_allow_html=True)
+    h[1].markdown("<small><b>Surgery List</b></small>", unsafe_allow_html=True)
+    h[2].markdown("<small><b>Session</b></small>", unsafe_allow_html=True)
+    h[3].markdown("<small><b>☢ X-ray?</b></small>", unsafe_allow_html=True)
+
+    for t in all_unique_types:
+        in_am = t in am_types or t in FIXED_EXTRA_SLOTS or (t == "Obstetric" and obs_today)
+        in_pm = t in pm_types or t in FIXED_EXTRA_SLOTS or (t == "Obstetric" and obs_today)
+        session_label = "AM + PM" if (in_am and in_pm) else ("AM only" if in_am else "PM only")
+        session_colour = "#00d4aa" if (in_am and in_pm) else "#1f8ef1" if in_am else "#f59e0b"
+
+        type_colour = (
+            "#ef4444" if t in FIXED_EXTRA_SLOTS else
+            "#00d4aa" if t == "Obstetric" else
+            "#e6edf3"
+        )
+
+        row = st.columns([0.25, 2.5, 0.8, 0.8])
+        # Colour dot
+        row[0].markdown(
+            f'<div style="width:10px;height:10px;border-radius:50%;'
+            f'background:{type_colour};margin-top:10px;"></div>',
+            unsafe_allow_html=True,
+        )
+        # Surgery type name
+        row[1].markdown(
+            f'<div style="padding:6px 0;font-size:.95rem;">{t}</div>',
+            unsafe_allow_html=True,
+        )
+        # Session badge
+        row[2].markdown(
+            f'<small style="color:{session_colour};">{session_label}</small>',
+            unsafe_allow_html=True,
+        )
+        # X-ray checkbox
+        current_xray = xray_types.get(t, False)
+        new_xray = row[3].checkbox(
+            "", value=current_xray, key=f"xray_type_{t}_{target_date}",
+            label_visibility="collapsed"
+        )
+        xray_types[t] = new_xray
+        # Update room_xray for any rooms already assigned to this type
+        for room in all_rooms:
+            if st.session_state.room_stype.get(room) == t:
+                st.session_state.room_xray[room] = new_xray
+
+    st.session_state[xray_state_key] = xray_types
+
+    # Show diff note if AM ≠ PM
+    am_only_diff = [t for t in am_types if t not in pm_types]
+    pm_only_diff = [t for t in pm_types if t not in am_types]
+    if am_only_diff or pm_only_diff:
         notes = []
-        if am_only:
-            notes.append(f"AM only: <b>{', '.join(am_only)}</b>")
-        if pm_only:
-            notes.append(f"PM only: <b>{', '.join(pm_only)}</b>")
+        if am_only_diff:
+            notes.append(f"AM only: <b>{', '.join(am_only_diff)}</b>")
+        if pm_only_diff:
+            notes.append(f"PM only: <b>{', '.join(pm_only_diff)}</b>")
         st.caption(" · ".join(notes))
 
     if not obs_today:
@@ -740,11 +800,13 @@ def show():
 
     if generate_clicked:
         st.session_state.reshuffle_seed = 0
+        xray_types_now = st.session_state.get(f"xray_types_{target_date}", {})
         with st.spinner("Generating draft…"):
             ma, consult_name = _generate_draft(
                 all_day, all_rooms, coordinator_name,
                 specialty_prefs, consult_criteria, seed=0,
                 target_date=target_date,
+                xray_types=xray_types_now,
             )
         st.session_state.manual_assign    = ma
         st.session_state["consult_manual"] = consult_name
@@ -754,11 +816,13 @@ def show():
     if reshuffle_clicked and st.session_state.draft:
         st.session_state.reshuffle_seed += 1
         seed = st.session_state.reshuffle_seed
+        xray_types_now = st.session_state.get(f"xray_types_{target_date}", {})
         with st.spinner(f"Reshuffling (combination #{seed})…"):
             ma, consult_name = _generate_draft(
                 all_day, all_rooms, coordinator_name,
                 specialty_prefs, consult_criteria, seed=seed,
                 target_date=target_date,
+                xray_types=xray_types_now,
             )
         st.session_state.manual_assign    = ma
         st.session_state["consult_manual"] = consult_name
