@@ -336,7 +336,7 @@ def _generate_draft(all_day, rooms, coordinator_name, specialty_prefs, consult_c
         if stype_room == "eot":
             ma[room] = {"am_lead":"— Unassigned —","am_asst":"— Unassigned —",
                         "pm_lead":"— Unassigned —","pm_asst":"— Unassigned —",
-                        "_note":"🔴 EOT — assign manually"}
+                        "_note":"🔴 EOT — assign manually", "_xray": False}
             continue
 
         # C7-OBS: only scheduled Mon/Wed/Fri
@@ -345,7 +345,7 @@ def _generate_draft(all_day, rooms, coordinator_name, specialty_prefs, consult_c
             if weekday not in OBS_DAYS:
                 ma[room] = {"am_lead":"— Unassigned —","am_asst":"— Unassigned —",
                             "pm_lead":"— Unassigned —","pm_asst":"— Unassigned —",
-                            "_note":"⬜ Obstetric not scheduled today"}
+                            "_note":"⬜ Obstetric not scheduled today", "_xray": False}
                 continue
 
         if stype_room == "trauma":
@@ -355,56 +355,51 @@ def _generate_draft(all_day, rooms, coordinator_name, specialty_prefs, consult_c
             ma[room] = {
                 "am_lead": am_lead, "am_asst": "— Unassigned —",
                 "pm_lead": pm_lead, "pm_asst": "— Unassigned —",
-                "_note": "🟡 Trauma — Senior Trainee solo",
+                "_note": "🟡 Trauma — Senior Trainee solo", "_xray": False,
             }
             continue
 
         # Normal room: AM lead + optional asst, PM lead + optional asst
-        # Use AM surgery type for AM specialty preference, PM type for PM specialty preference
         weekday      = target_date.strftime("%A") if target_date else "Monday"
         day_sched    = WEEKLY_SCHEDULE.get(weekday, {"am":[], "pm":[]})
         stype_str    = st.session_state.room_stype.get(room, "General Surgery")
-        # PM may have a different specialty list — find best match
-        pm_types_day = day_sched.get("pm", [])
-        pm_stype_str = stype_str  # default same; PM specialty matching uses this
+        pm_stype_str = stype_str
+
+        # X-ray flag for this room's surgery type — exclude pregnant staff if True
+        room_is_xray = bool(xray_types.get(stype_str, False))
+        am_pool_use  = [cd for cd in am_pool if not (room_is_xray and cd.staff.pregnant)]
+        pm_pool_use  = [cd for cd in pm_pool if not (room_is_xray and cd.staff.pregnant)]
 
         # Pick AM lead (Specialist/Consultant only)
-        am_lead_cd = _pick_lead(am_pool, am_used, coordinator_name, stype_str, specialty_prefs)
+        am_lead_cd = _pick_lead(am_pool_use, am_used, coordinator_name, stype_str, specialty_prefs)
         am_lead    = am_lead_cd.staff.name if am_lead_cd else "— Unassigned —"
 
         # Pick AM assistant (Senior Trainee/Trainee only) — optional
-        am_asst_cd = _pick_asst(am_pool, am_used, coordinator_name)
+        am_asst_cd = _pick_asst(am_pool_use, am_used, coordinator_name)
         am_asst    = am_asst_cd.staff.name if am_asst_cd else "— Unassigned —"
 
         # PM Lead: prefer same person as AM lead for continuity in same room
         pm_lead_cd = None
         if am_lead_cd:
-            same_in_pm = next((cd for cd in pm_pool
+            same_in_pm = next((cd for cd in pm_pool_use
                                if cd.staff.id == am_lead_cd.staff.id
                                and cd.staff.id not in pm_used), None)
             if same_in_pm:
                 pm_lead_cd = same_in_pm
                 pm_used.add(same_in_pm.staff.id)
         if pm_lead_cd is None:
-            pm_lead_cd = _pick_lead(pm_pool, pm_used, coordinator_name, pm_stype_str, specialty_prefs)
+            pm_lead_cd = _pick_lead(pm_pool_use, pm_used, coordinator_name, pm_stype_str, specialty_prefs)
         pm_lead = pm_lead_cd.staff.name if pm_lead_cd else "— Unassigned —"
 
-        # PM Assistant logic:
-        # 1. If the AM assistant is also PM available → reuse them (same pair, same room)
-        # 2. If the AM assistant has pm PAAC (AM-only) → leave PM assistant BLANK
-        #    unless there are surplus trainees after all rooms have their leads covered
-        # 3. Only pick a new PM assistant if genuinely spare trainees are available
+        # PM Assistant: reuse AM asst if PM available, else leave blank (second pass fills surplus)
         pm_asst_cd = None
         if am_asst_cd:
-            same_asst_pm = next((cd for cd in pm_pool
+            same_asst_pm = next((cd for cd in pm_pool_use
                                  if cd.staff.id == am_asst_cd.staff.id
                                  and cd.staff.id not in pm_used), None)
             if same_asst_pm:
-                # Same person available PM — reuse
                 pm_asst_cd = same_asst_pm
                 pm_used.add(same_asst_pm.staff.id)
-            # else: AM asst has pm PAAC or not PM available — leave blank for now
-            # We'll fill in surplus trainees in a second pass after all rooms processed
 
         pm_asst = pm_asst_cd.staff.name if pm_asst_cd else "— Unassigned —"
 
@@ -412,7 +407,7 @@ def _generate_draft(all_day, rooms, coordinator_name, specialty_prefs, consult_c
             "am_lead": am_lead, "am_asst": am_asst,
             "pm_lead": pm_lead, "pm_asst": pm_asst,
             "_note": "☢ X-ray list" if room_is_xray else "",
-            "_xray": room_is_xray,   # carried back to caller to update session state
+            "_xray": room_is_xray,
         }
 
     # ── Second pass: fill PM assistants with surplus trainees ────────────────
